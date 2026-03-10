@@ -24,6 +24,12 @@ The LLM receives a set of tool schemas and decides on its own what to call. It c
 
 ---
 
+## Demo
+
+![Strava Coach Bot Demo](docs/demo.png)
+
+---
+
 ## Features
 
 - **Agentic LLM** -- the model decides what tools to call, not hardcoded routing. Chains multiple tools per message when needed.
