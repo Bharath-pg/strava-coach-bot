@@ -19,6 +19,16 @@ class Settings(BaseSettings):
     strava_refresh_token: str = ""
 
     @property
+    def async_database_url(self) -> str:
+        """Normalize DATABASE_URL for async SQLAlchemy (Railway uses postgres://)."""
+        url = self.database_url
+        if url.startswith("postgres://"):
+            url = url.replace("postgres://", "postgresql+asyncpg://", 1)
+        elif url.startswith("postgresql://"):
+            url = url.replace("postgresql://", "postgresql+asyncpg://", 1)
+        return url
+
+    @property
     def allowed_users(self) -> set[int]:
         if not self.allowed_user_ids.strip():
             return set()
