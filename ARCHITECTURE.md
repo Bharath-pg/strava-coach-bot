@@ -17,8 +17,8 @@ A comprehensive breakdown of every component, design decision, and technology us
    - [Service Layer](#4-service-layer)
    - [Agentic LLM Layer](#5-agentic-llm-layer)
    - [Telegram Bot Handlers](#6-telegram-bot-handlers)
-   - [Reminder Scheduler](#8-reminder-scheduler)
-   - [MCP Server](#9-mcp-server)
+   - [Reminder Scheduler](#7-reminder-scheduler)
+   - [MCP Server](#8-mcp-server)
 6. [Infrastructure](#infrastructure)
    - [Docker](#docker)
    - [CI/CD](#cicd)
@@ -34,8 +34,9 @@ A comprehensive breakdown of every component, design decision, and technology us
 This is a Telegram running coach bot with two domains: Strava/running and reminders. What makes it more than a simple bot:
 
 - **Agentic tool-calling** -- the LLM autonomously decides which tools to invoke, observes results, chains multiple calls, and composes a natural response. No hardcoded intent routing.
+- **DB-backed training plans** -- users create full training plans via natural language. The LLM generates a periodized plan and stores it in PostgreSQL. Individual sessions can be added, edited, or deleted.
 - **Pluggable LLM backend** -- abstract interface with Groq and Gemini implementations; swap providers by changing one env var
-- **MCP server** -- exposes 10 tools (expenses, reminders, Strava) via Model Context Protocol, allowing external AI systems (Cursor, Claude Desktop) to query your data
+- **MCP server** -- exposes 11 tools (reminders, Strava, training plans) via Model Context Protocol, allowing external AI systems (Cursor, Claude Desktop) to query your data
 - **Strava integration** -- fetches running activities, compares against a training plan, generates weekly check-in reports
 - **Production-ready infrastructure** -- async Python, PostgreSQL, Docker, database migrations, CI/CD
 
@@ -62,14 +63,14 @@ This is a Telegram running coach bot with two domains: Strava/running and remind
                    ┌────────────────┼────────────────┐
                    ▼                ▼                ▼
             ┌──────────┐    ┌──────────┐    ┌──────────┐
-            │ Expense   │    │ Reminder │    │  Strava  │
-            │ Service   │    │ Service  │    │ Service  │
+            │ Training  │    │ Reminder │    │  Strava  │
+            │ Plan Svc  │    │ Service  │    │ Service  │
             └─────┬─────┘    └────┬─────┘    └────┬─────┘
                   │               │               │
                   ▼               ▼               ▼
            ┌────────────────┐           ┌────────────────┐
            │   PostgreSQL    │           │   Strava API   │
-           │  (expenses +    │           │  (OAuth2 +     │
+           │  (plans +       │           │  (OAuth2 +     │
            │   reminders)    │           │   REST)        │
            └────────────────┘           └────────────────┘
 
@@ -94,20 +95,19 @@ strava-coach-bot/
 │   │   └── session.py             # Async SQLAlchemy engine + session factory
 │   │
 │   ├── models/
-│   │   ├── expense.py             # Expense ORM model
-│   │   └── reminder.py            # Reminder ORM model
+│   │   ├── reminder.py            # Reminder ORM model
+│   │   └── training_plan.py       # TrainingPlan + TrainingSession ORM models
 │   │
 │   ├── services/
-│   │   ├── expense.py             # Full CRUD + analytics + category lookup
 │   │   ├── reminder.py            # CRUD + due detection + recurrence logic
 │   │   ├── strava.py              # Strava API client (OAuth2 token refresh)
-│   │   ├── training_plan.py       # 7-week sub-60 10K training plan
+│   │   ├── training_plan.py       # DB-backed training plan CRUD
 │   │   └── weekly_checkin.py      # Compares Strava data against training plan
 │   │
 │   ├── llm/
 │   │   ├── base.py                # Abstract BaseLLM interface
 │   │   ├── prompts.py             # Agent system prompt
-│   │   ├── tools.py               # 13 tool schemas + execute_tool() dispatcher
+│   │   ├── tools.py               # 11 tool schemas + execute_tool() dispatcher
 │   │   ├── groq_llm.py            # Groq implementation with tool-calling agent loop
 │   │   ├── gemini.py              # Google Gemini implementation
 │   │   └── parser.py              # Provider selection + run_agent()
@@ -115,21 +115,20 @@ strava-coach-bot/
 │   ├── bot/
 │   │   ├── handlers/
 │   │   │   ├── start.py           # /start, /help
-│   │   │   ├── expense.py         # /expense, /edit, /delete, /summary, /recent
 │   │   │   └── reminder.py        # /remind, /reminders, /cancel
 │   │   └── conversation.py        # NL catch-all → agent loop
 │   │
 │   └── mcp/
-│       └── server.py              # MCP server with 10 tools (stdio transport)
+│       └── server.py              # MCP server with 11 tools (stdio transport)
 │
 ├── alembic/
 │   ├── env.py                     # Async migration runner
 │   └── versions/
-│       └── 001_initial_schema.py  # Creates expenses + reminders tables
+│       ├── 001_initial_schema.py  # Creates reminders table
+│       └── 002_training_plans.py  # Creates training_plans + training_sessions + seed data
 │
 ├── tests/
 │   ├── conftest.py                # In-memory SQLite fixtures for testing
-│   ├── test_expense.py            # Expense service tests
 │   ├── test_reminder.py           # Reminder service tests
 │   └── test_llm.py                # LLM parser tests (mocked)
 │
@@ -191,13 +190,14 @@ Key design choices:
 - **Defaults for non-critical fields** so the app doesn't crash during testing (tokens default to empty string)
 - **`@lru_cache`** on `get_settings()` for singleton behavior
 - **`allowed_users` property** parses the comma-separated string into a `set[int]` for O(1) auth checks
+- **`async_database_url` property** normalizes Railway's `postgres://` URLs to `postgresql+asyncpg://` for SQLAlchemy
 
 ### 2. Database Layer
 
 **File**: `src/db/session.py`
 
 ```python
-engine = create_async_engine(settings.database_url)
+engine = create_async_engine(settings.async_database_url)
 async_session_factory = async_sessionmaker(engine, expire_on_commit=False)
 ```
 
@@ -207,17 +207,28 @@ async_session_factory = async_sessionmaker(engine, expire_on_commit=False)
 
 ### 3. ORM Models
 
-**Expense** (`src/models/expense.py`):
+**TrainingPlan** (`src/models/training_plan.py`):
 | Column | Type | Notes |
 |--------|------|-------|
 | id | Integer PK | Auto-increment |
 | user_id | BigInteger | Telegram user ID, indexed |
-| amount | Numeric(12,2) | Precise decimal math |
-| currency | String(3) | Default "INR" |
-| category | String(50) | Lowercased on save |
-| description | String(500) | Free text |
-| date | Date | When the expense occurred |
+| name | String(200) | Plan name (e.g. "Sub-60 10K Plan") |
+| goal | String(500) | Goal description |
+| start_date | Date | Plan start date |
+| end_date | Date | Plan end / race date |
+| is_active | Boolean | Only one active plan per user |
 | created_at | DateTime(tz) | Server-side `now()` |
+
+**TrainingSession** (`src/models/training_plan.py`):
+| Column | Type | Notes |
+|--------|------|-------|
+| id | Integer PK | Auto-increment |
+| plan_id | Integer FK | References training_plans.id, CASCADE delete |
+| date | Date | Session date |
+| session_type | String(50) | easy/rest/tempo/intervals/strides/long/race |
+| distance_km | Float | Target distance |
+| pace_target | String(50) | Target pace (e.g. "6:00/km") |
+| description | String(500) | Human-readable description |
 
 **Reminder** (`src/models/reminder.py`):
 | Column | Type | Notes |
@@ -232,8 +243,9 @@ async_session_factory = async_sessionmaker(engine, expire_on_commit=False)
 
 Design notes:
 - **`BigInteger` for user_id** because Telegram IDs can exceed 32-bit range
-- **`Numeric(12,2)` for amount** avoids floating-point precision issues (important for financial data)
 - **Soft-delete on reminders** (`is_active`) instead of hard delete, so recurring reminders can be deactivated without losing history
+- **One-to-many relationship** between TrainingPlan and TrainingSession with CASCADE delete
+- **`is_active` on plans** ensures only one active plan per user; creating a new plan deactivates the old one
 
 ### 4. Service Layer
 
@@ -242,15 +254,15 @@ The service layer sits between handlers and the database. This separation means:
 - Services are independently testable (no Telegram dependency)
 - Database queries are encapsulated in one place
 
-**Expense Service** (`src/services/expense.py`):
-- `add_expense()` -- create with normalized category/currency
-- `get_expense()` -- fetch by ID + user (ownership check)
-- `update_expense()` -- partial update with field whitelist
-- `delete_expense()` -- hard delete with ownership check
-- `query_expenses()` -- filtered list with date range, category, limit
-- `expense_summary()` -- GROUP BY category aggregation (total + count)
-- `get_user_categories()` -- distinct categories ordered by usage frequency
-- `period_to_dates()` -- converts "today"/"week"/"month"/"year" to date ranges
+**Training Plan Service** (`src/services/training_plan.py`):
+- `create_plan()` -- create a full plan with all sessions; deactivates any existing active plan
+- `get_active_plan()` -- fetch the user's active plan with eager-loaded sessions
+- `get_session()` -- planned workout for a specific date
+- `get_week_sessions()` -- all sessions for a given week
+- `add_session_to_plan()` -- add a single session to the active plan
+- `update_session()` -- partial update (date, type, distance, pace, description)
+- `delete_session()` -- remove a session with ownership validation
+- `get_week_number()` -- 1-based training week number relative to plan start
 
 **Reminder Service** (`src/services/reminder.py`):
 - `set_reminder()` -- create with recurrence validation
@@ -266,15 +278,10 @@ The service layer sits between handlers and the database. This separation means:
 - `get_day_activities()` -- convenience wrapper for a single day
 - Returns `ActivitySummary` dataclass with computed properties (pace, formatted time)
 
-**Training Plan** (`src/services/training_plan.py`):
-- Hardcoded 7-week sub-60 10K training plan (Mar 10 -- Apr 27, 2026)
-- `get_session(date)` -- planned workout for a specific date
-- `get_week_sessions(date)` -- all planned sessions for the week
-- `get_week_number(date)` -- 1-based training week number
-
 **Weekly Check-in** (`src/services/weekly_checkin.py`):
-- Compares actual Strava activities against the training plan
+- Compares actual Strava activities against the user's active training plan from the DB
 - Produces a formatted report with completion percentages, pace comparisons, and next week preview
+- Scheduled as a cron job (Sunday 7PM IST) and available on-demand via tool call
 
 ### 5. Agentic LLM Layer
 
@@ -283,26 +290,24 @@ This is the most architecturally interesting component. Instead of the LLM actin
 **How it works (ReAct-style agent loop)**:
 
 ```
-User: "I spent 200 on lunch today"
+User: "Create a 5K plan for sub-25 starting next Monday"
   │
   ▼
-Agent Loop (max 5 iterations):
+Agent Loop (max 8 iterations):
   │
-  ├─ Iteration 1: LLM sees user message + 13 tool schemas
-  │   LLM decides: call list_categories()
-  │   Result: "Existing categories: food, transport, strava"
+  ├─ Iteration 1: LLM sees user message + 11 tool schemas
+  │   LLM decides: call create_training_plan(name="Sub-25 5K Plan", goal="...", sessions=[...42 sessions...])
+  │   Result: "Training plan 'Sub-25 5K Plan' created with 42 sessions (30 runs, 199 km)"
   │
-  ├─ Iteration 2: LLM sees result, decides: call add_expense(200, "food", "lunch", "2026-03-03")
-  │   Result: "Expense #42 recorded: Rs.200 | food | lunch | 2026-03-03"
-  │
-  └─ Iteration 3: LLM sees result, no more tool calls needed
-      Returns: "Got it! Recorded Rs.200 for lunch under food. 🍽️"
+  └─ Iteration 2: LLM sees result, no more tool calls needed
+      Returns: "Your new training plan is ready! 42 sessions across 6 weeks..."
 ```
 
 **Tool schemas** (`src/llm/tools.py`):
-- 13 tools defined in OpenAI function-calling format
+- 11 tools defined in OpenAI function-calling format
 - `user_id` is deliberately excluded from schemas -- injected server-side to prevent the LLM from accessing other users' data
 - `execute_tool(name, args, user_id)` dispatches to service-layer functions
+- Training plan creation: the LLM generates the full `sessions` array (dates, types, distances, paces, descriptions) in a single tool call
 
 **Agent loop** (`src/llm/groq_llm.py`):
 ```python
@@ -321,26 +326,21 @@ async def run_agent(self, user_message: str, user_id: int) -> str:
 
 **Key design decisions**:
 - **`tool_choice="auto"`** lets the LLM decide when to call tools vs respond directly (casual chat gets no tool calls)
-- **Max 5 iterations** prevents runaway loops
-- **Category confirmation is conversational** -- the agent calls `list_categories` first, sees existing categories, and naturally picks the right one or asks the user
+- **Max 8 iterations** prevents runaway loops
+- **Plan generation in one shot** -- the LLM outputs the entire `sessions` array in a single `create_training_plan` call rather than making 40+ individual `add_training_session` calls
 - **Groq's native tool-calling** via `tools` parameter -- no prompt hacking or JSON-mode workarounds
 
 ### 6. Telegram Bot Handlers
 
 **Command handlers** handle explicit `/commands`:
 - `/start`, `/help` -- welcome text with usage examples
-- `/expense 50 food Lunch` -- direct expense creation
-- `/edit 5 category food` -- update expense field by ID
-- `/delete 5` -- delete expense by ID
-- `/summary month` -- aggregated spending report
-- `/recent 10` -- last N expenses
 - `/remind` -- usage instructions
 - `/reminders` -- list active reminders
 - `/cancel 3` -- deactivate reminder by ID
 
-**Conversation handler** (`src/bot/conversation.py`) catches all non-command text and routes it through the agent loop. The agent handles everything -- expense tracking, reminders, Strava queries, and casual chat.
+**Conversation handler** (`src/bot/conversation.py`) catches all non-command text and routes it through the agent loop. The agent handles everything -- training plan creation/editing, reminders, Strava queries, and casual chat.
 
-### 8. Reminder Scheduler
+### 7. Reminder Scheduler
 
 **Problem**: Reminders need to fire at specific times, but the bot is event-driven (responds to messages).
 
@@ -354,19 +354,19 @@ The scheduler is started in `post_init` (after the event loop is running), not i
 
 A weekly cron job (Sunday 7PM IST) sends an automated Strava training check-in to all configured users.
 
-### 9. MCP Server
+### 8. MCP Server
 
 **File**: `src/mcp/server.py`
 
-Exposes 10 tools via Model Context Protocol using stdio transport:
+Exposes 11 tools via Model Context Protocol using stdio transport:
 
-**Expense tools**: `add_expense`, `query_expenses`, `expense_summary`
+**Training plan tools**: `create_training_plan`, `add_training_session`, `update_training_session`, `delete_training_session`, `get_training_plan`, `get_training_status`
+**Strava tools**: `get_strava_activities`, `get_run_details`
 **Reminder tools**: `set_reminder`, `list_reminders`, `cancel_reminder`
-**Strava tools**: `get_strava_activities`, `get_run_details`, `get_training_plan`, `get_training_status`
 
 Each tool is a thin wrapper around the service layer -- the same business logic the Telegram bot uses.
 
-**Why MCP?** It makes the bot's capabilities available to any MCP-compatible client. For example, from Cursor you could ask "How much did I spend on food this month?" and it would call `expense_summary` directly. Or "What should I run today?" would call `get_training_plan`.
+**Why MCP?** It makes the bot's capabilities available to any MCP-compatible client. For example, from Cursor you could ask "What should I run today?" and it would call `get_training_plan` directly. Or "Create a half marathon plan" would call `create_training_plan`.
 
 **Transport**: stdio (not HTTP). The MCP client spawns the server as a subprocess and communicates via stdin/stdout. This is why it's not a persistent Docker service -- it's invoked on-demand.
 
@@ -407,34 +407,37 @@ On every push/PR to `main`:
 **Alembic** with async support:
 - `alembic/env.py` uses `async_engine_from_config` and `asyncio.run()` to run migrations async
 - Migration files in `alembic/versions/` are version-controlled
-- `001_initial_schema.py` creates both tables with indexes
+- `001_initial_schema.py` creates the reminders table
+- `002_training_plans.py` creates training_plans + training_sessions tables and seeds the initial hardcoded plan
 
 ---
 
 ## Data Flow Examples
 
-### "I spent 200 on groceries yesterday" (Agentic Flow)
+### "Create a 5K plan for sub-25 starting next Monday" (Plan Generation)
 
 ```
 User message
     │
     ▼
 conversation_handler()
-    │ run_agent("I spent 200 on groceries yesterday", user_id=123456789)
+    │ run_agent("Create a 5K plan for sub-25 starting next Monday", user_id=123456789)
     ▼
 GroqLLM.run_agent()  ─── Agent Loop ───
     │
-    ├─ Iter 1: LLM calls list_categories()
-    │   Tool result: "Existing categories: food, transport, strava"
+    ├─ Iter 1: LLM generates full plan and calls create_training_plan(
+    │     name="Sub-25 5K Plan", goal="Run 5K in under 25 minutes",
+    │     start_date="2026-03-17", end_date="2026-04-27",
+    │     sessions=[{date: "2026-03-17", session_type: "easy", ...}, ...42 sessions]
+    │   )
+    │   Service: deactivates old plan → creates TrainingPlan → bulk inserts TrainingSessions
+    │   Tool result: "Training plan 'Sub-25 5K Plan' created with 42 sessions (30 runs, 199 km)"
     │
-    ├─ Iter 2: LLM calls add_expense(amount=200, category="food", description="groceries", date="2026-03-02")
-    │   Tool result: "Expense #42 recorded: Rs.200 | food | groceries | 2026-03-02"
-    │
-    └─ Iter 3: LLM produces final text (no tool calls)
-        "Got it! Recorded Rs.200 for groceries under food on March 2nd."
+    └─ Iter 2: LLM produces final text (no tool calls)
+        "Your new training plan is ready! 42 sessions across 6 weeks..."
     │
     ▼
-msg.reply_text("Got it! Recorded Rs.200 for groceries under food on March 2nd.")
+msg.reply_text("Your new training plan is ready! ...")
 ```
 
 ### "How was my run today?" (Multi-tool chain)
@@ -444,15 +447,14 @@ User message
     │
     ▼
 Agent Loop:
-    ├─ Iter 1: LLM calls get_run_details(date="2026-03-03")
-    │   Tool result: "Morning Run: 4.2 km in 31m 12s | 7:26/km"
+    ├─ Iter 1: LLM calls get_run_details(date="2026-03-10")
+    │   Tool result: "Morning Run: 3.95 km in 25m 7s | 6:21/km"
     │
-    ├─ Iter 2: LLM calls get_training_plan(date="2026-03-03")
-    │   Tool result: "Wed Mar 03 (Week 1): 4 km easy run, Pace: 7:00+/km"
+    ├─ Iter 2: LLM calls get_training_plan(date="2026-03-10")
+    │   Tool result: "Tue Mar 10 (Week 1): Easy 4 km run, Pace: 7:00+/km"
     │
     └─ Iter 3: Final text response
-        "Nice run! You covered 4.2 km (target was 4 km) at 7:26/km pace.
-         Slightly above the 7:00+/km target but still in the easy zone. 👍"
+        "Nice run! You covered 3.95 km at 6:21/km -- faster than the 7:00+/km target."
 ```
 
 ### Reminder firing
@@ -485,11 +487,8 @@ Tests use **in-memory SQLite** via `aiosqlite` -- no PostgreSQL needed to run te
 4. Drop all tables + dispose engine
 
 **Test coverage**:
-- **Expense service**: add, query with filters, summary aggregation, period date math
 - **Reminder service**: create, cancel, ownership checks, due detection, recurrence advancement, one-time deactivation
 - **LLM parser**: mocked LLM to test intent routing without API calls
-
-14 tests, all async, run in ~0.1s.
 
 ---
 
@@ -499,12 +498,12 @@ Tests use **in-memory SQLite** via `aiosqlite` -- no PostgreSQL needed to run te
 |----------|------------|-------------|
 | Agentic tool-calling | Intent classification + routing | LLM autonomously chains tools, handles edge cases, and composes natural responses. No need to hardcode every interaction flow. |
 | user_id injected server-side | Include user_id in tool schemas | Prevents the LLM from fabricating or guessing user IDs. Security by design. |
-| Conversational category confirmation | Inline keyboard buttons | The agent naturally checks existing categories and picks the right one. Simpler code, more flexible. |
-| Max 5 agent iterations | Unlimited | Prevents runaway loops and excessive API calls. 5 is enough for any reasonable user request. |
+| DB-backed training plans | Hardcoded in Python | Users can create, edit, and delete plans via the bot. Multiple plans, plan history. |
+| Full plan in one tool call | Session-by-session tool calls | One `create_training_plan` call with 40+ sessions is vastly more efficient than 40+ individual `add_training_session` calls. |
+| Max 8 agent iterations | 5 or unlimited | 8 allows for plan generation + summary. Prevents runaway loops and excessive API calls. |
 | Polling (not webhooks) | Webhooks | Simpler for development; no public URL/SSL needed. Can switch later. |
 | APScheduler in-process | Celery + Redis | One fewer service to run. Fine for single-instance bot. |
 | Soft-delete reminders | Hard delete | Preserves history; recurring reminders need state. |
 | SQLite for tests | Testcontainers (Postgres) | Fast (0.1s), no Docker dependency in CI, good enough for service-level tests. |
 | stdio MCP transport | HTTP/SSE | Standard for local MCP clients (Cursor, Claude Desktop). No server to keep running. |
 | Groq over Gemini | Gemini only | Gemini free tier had quota issues; Groq is reliable with generous limits + native tool calling. |
-| INR hardcoded | Multi-currency | YAGNI -- single-user bot, no currency conversion complexity. |

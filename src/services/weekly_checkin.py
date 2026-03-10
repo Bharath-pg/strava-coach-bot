@@ -3,9 +3,11 @@ from __future__ import annotations
 import datetime
 import logging
 
+from src.db.session import async_session_factory
 from src.services.strava import ActivitySummary, get_week_activities
 from src.services.training_plan import (
     PlannedSession,
+    get_active_plan,
     get_planned_distance,
     get_planned_run_count,
     get_week_number,
@@ -13,13 +15,6 @@ from src.services.training_plan import (
 )
 
 logger = logging.getLogger(__name__)
-
-
-def _match_activity_to_session(
-    activity: ActivitySummary, sessions: list[PlannedSession]
-) -> PlannedSession | None:
-    activity_date = activity.start_date.date()
-    return next((s for s in sessions if s.date == activity_date), None)
 
 
 def _format_pace_comparison(actual_pace: str, target_pace: str) -> str:
@@ -32,8 +27,9 @@ def build_weekly_report(
     reference_date: datetime.date,
     activities: list[ActivitySummary],
     planned_sessions: list[PlannedSession],
+    plan_start: datetime.date,
 ) -> str:
-    week_num = get_week_number(reference_date)
+    week_num = get_week_number(plan_start, reference_date)
     monday = reference_date - datetime.timedelta(days=reference_date.weekday())
     sunday = monday + datetime.timedelta(days=6)
 
@@ -43,10 +39,10 @@ def build_weekly_report(
     actual_km = round(sum(a.distance_km for a in activities), 2)
 
     pct = round(actual_km / planned_km * 100) if planned_km > 0 else 0
-    pct_bar = "🟢" if pct >= 90 else "🟡" if pct >= 70 else "🔴"
+    pct_bar = "\U0001f7e2" if pct >= 90 else "\U0001f7e1" if pct >= 70 else "\U0001f534"
 
     lines: list[str] = []
-    lines.append(f"📊 Week {week_num} Check-in ({monday:%b %d} – {sunday:%b %d})")
+    lines.append(f"\U0001f4ca Week {week_num} Check-in ({monday:%b %d} \u2013 {sunday:%b %d})")
     lines.append("")
     lines.append(f"{pct_bar} Runs: {actual_runs}/{planned_runs}")
     lines.append(f"{pct_bar} Distance: {actual_km} / {planned_km} km ({pct}%)")
@@ -55,59 +51,55 @@ def build_weekly_report(
     run_sessions = [s for s in planned_sessions if s.session_type != "rest"]
     activities_by_date = {a.start_date.date(): a for a in activities}
 
-    for session in run_sessions:
-        activity = activities_by_date.get(session.date)
-        day_name = session.date.strftime("%a %b %d")
+    for s in run_sessions:
+        activity = activities_by_date.get(s.date)
+        day_name = s.date.strftime("%a %b %d")
 
         if activity:
-            pace_str = _format_pace_comparison(activity.pace_per_km, session.pace_target)
-            dist_diff = activity.distance_km - session.distance_km
+            pace_str = _format_pace_comparison(activity.pace_per_km, s.pace_target)
+            dist_diff = activity.distance_km - s.distance_km
             dist_indicator = ""
             if abs(dist_diff) > 0.5:
                 dist_indicator = f" ({'+' if dist_diff > 0 else ''}{dist_diff:.1f} km)"
 
-            lines.append(
-                f"  ✅ {day_name} | {session.description}"
-            )
+            lines.append(f"  \u2705 {day_name} | {s.description}")
             lines.append(
                 f"     {activity.distance_km} km in {activity.moving_time_formatted} | {pace_str}{dist_indicator}"
             )
         else:
-            lines.append(f"  ❌ {day_name} | {session.description} — missed")
-
-    # Next week preview
-    next_monday = monday + datetime.timedelta(days=7)
-    next_sessions = get_week_sessions(next_monday)
-    next_run_sessions = [s for s in next_sessions if s.session_type != "rest"]
-
-    if next_run_sessions:
-        lines.append("")
-        lines.append("📅 Next week preview:")
-        for s in next_run_sessions:
-            lines.append(f"  {s.date:%a} | {s.description}")
+            lines.append(f"  \u274c {day_name} | {s.description} \u2014 missed")
 
     return "\n".join(lines)
 
 
 async def generate_weekly_checkin(
+    user_id: int,
     reference_date: datetime.date | None = None,
 ) -> str:
     if reference_date is None:
         reference_date = datetime.date.today()
 
-    planned = get_week_sessions(reference_date)
+    async with async_session_factory() as session:
+        plan = await get_active_plan(session, user_id)
+
+    if not plan:
+        return "No active training plan. Create one by telling me your goal!"
+
+    async with async_session_factory() as session:
+        planned = await get_week_sessions(session, user_id, reference_date)
+
     if not planned:
-        return "No training plan data for this week."
+        return "No training sessions scheduled for this week."
 
     try:
         activities = await get_week_activities(reference_date)
     except Exception:
         logger.exception("Failed to fetch Strava activities")
-        return "⚠️ Couldn't fetch Strava data. Check your API credentials."
+        return "\u26a0\ufe0f Couldn't fetch Strava data. Check your API credentials."
 
-    return build_weekly_report(reference_date, activities, planned)
+    return build_weekly_report(reference_date, activities, planned, plan.start_date)
 
 
-async def send_weekly_checkin(app, chat_id: int) -> None:  # type: ignore[no-untyped-def]
-    report = await generate_weekly_checkin()
+async def send_weekly_checkin(app, chat_id: int, user_id: int) -> None:  # type: ignore[no-untyped-def]
+    report = await generate_weekly_checkin(user_id)
     await app.bot.send_message(chat_id=chat_id, text=report)

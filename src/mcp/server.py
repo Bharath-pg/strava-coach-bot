@@ -1,4 +1,4 @@
-"""MCP server exposing reminder and Strava tools via stdio transport."""
+"""MCP server exposing reminder, Strava, and training plan tools via stdio transport."""
 from __future__ import annotations
 
 import datetime
@@ -14,9 +14,14 @@ from src.services.reminder import (
 )
 from src.services.strava import get_activities, get_day_activities
 from src.services.training_plan import (
+    add_session_to_plan,
+    create_plan,
+    delete_session,
+    get_active_plan,
     get_session as get_plan_session,
     get_week_number,
     get_week_sessions,
+    update_session,
 )
 from src.services.weekly_checkin import generate_weekly_checkin
 
@@ -95,7 +100,7 @@ async def cancel_reminder(user_id: int, reminder_id: int) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Strava / Training tools
+# Strava / Training tools (read)
 # ---------------------------------------------------------------------------
 
 @mcp.tool()
@@ -128,14 +133,17 @@ async def get_strava_activities(
 
 
 @mcp.tool()
-async def get_run_details(date: str | None = None) -> str:
+async def get_run_details(user_id: int, date: str | None = None) -> str:
     """Get details of runs recorded on a specific date, compared against the training plan.
 
     Args:
+        user_id: Telegram user ID
         date: Date in YYYY-MM-DD format (default today)
     """
     target_date = datetime.date.fromisoformat(date) if date else datetime.date.today()
-    planned = get_plan_session(target_date)
+
+    async with async_session_factory() as session:
+        planned = await get_plan_session(session, user_id, target_date)
 
     try:
         activities = await get_day_activities(target_date)
@@ -162,32 +170,40 @@ async def get_run_details(date: str | None = None) -> str:
 
 
 @mcp.tool()
-async def get_training_plan(date: str | None = None) -> str:
+async def get_training_plan(user_id: int, date: str | None = None) -> str:
     """Get the planned training session for a specific date.
 
     Args:
+        user_id: Telegram user ID
         date: Date in YYYY-MM-DD format (default today)
     """
     target_date = datetime.date.fromisoformat(date) if date else datetime.date.today()
-    session = get_plan_session(target_date)
 
-    if not session:
-        return f"No plan data for {target_date.strftime('%A, %b %d')}."
+    async with async_session_factory() as session:
+        plan = await get_active_plan(session, user_id)
+        planned_session = await get_plan_session(session, user_id, target_date)
+
+    if not plan:
+        return "No active training plan."
+
+    if not planned_session:
+        return f"No session scheduled for {target_date.strftime('%A, %b %d')}."
 
     day_label = target_date.strftime("%A, %b %d")
-    week_num = get_week_number(target_date)
+    week_num = get_week_number(plan.start_date, target_date)
 
-    if session.session_type == "rest":
-        return f"{day_label} (Week {week_num}): Rest day. {session.description}"
+    if planned_session.session_type == "rest":
+        return f"{day_label} (Week {week_num}): Rest day. {planned_session.description}"
 
     lines = [
         f"{day_label} (Week {week_num}):",
-        f"  {session.description}",
-        f"  Distance: {session.distance_km} km | Pace: {session.pace_target} | Type: {session.session_type}",
+        f"  {planned_session.description}",
+        f"  Distance: {planned_session.distance_km} km | Pace: {planned_session.pace_target} | Type: {planned_session.session_type}",
     ]
 
-    week_sessions = get_week_sessions(target_date)
-    remaining = [s for s in week_sessions if s.date > target_date and s.session_type != "rest"]
+    async with async_session_factory() as session:
+        week = await get_week_sessions(session, user_id, target_date)
+    remaining = [s for s in week if s.date > target_date and s.session_type != "rest"]
     if remaining:
         lines.append("Upcoming this week:")
         for s in remaining:
@@ -196,14 +212,148 @@ async def get_training_plan(date: str | None = None) -> str:
 
 
 @mcp.tool()
-async def get_training_status(reference_date: str | None = None) -> str:
+async def get_training_status(user_id: int, reference_date: str | None = None) -> str:
     """Get a weekly training check-in comparing actual Strava activities against the plan.
 
     Args:
+        user_id: Telegram user ID
         reference_date: Any date within the target week (YYYY-MM-DD). Defaults to today.
     """
     ref = datetime.date.fromisoformat(reference_date) if reference_date else None
-    return await generate_weekly_checkin(ref)
+    return await generate_weekly_checkin(user_id, ref)
+
+
+# ---------------------------------------------------------------------------
+# Training plan tools (write)
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+async def create_training_plan(
+    user_id: int,
+    name: str,
+    goal: str,
+    start_date: str,
+    end_date: str,
+    sessions: list[dict],
+) -> str:
+    """Create a complete training plan with all sessions. Deactivates any existing active plan.
+
+    Args:
+        user_id: Telegram user ID
+        name: Plan name (e.g. 'Sub-50 10K Plan')
+        goal: Goal description
+        start_date: Plan start date YYYY-MM-DD
+        end_date: Plan end date / race date YYYY-MM-DD
+        sessions: Array of session dicts with date, session_type, distance_km, pace_target, description
+    """
+    async with async_session_factory() as session:
+        plan = await create_plan(
+            session,
+            user_id=user_id,
+            name=name,
+            goal=goal,
+            start_date=datetime.date.fromisoformat(start_date),
+            end_date=datetime.date.fromisoformat(end_date),
+            sessions_data=sessions,
+        )
+
+    run_count = sum(1 for s in sessions if s.get("session_type") != "rest")
+    total_km = sum(s.get("distance_km", 0) for s in sessions)
+    return (
+        f"Training plan '{plan.name}' created with {len(sessions)} sessions "
+        f"({run_count} runs, {total_km:.1f} km total) "
+        f"from {plan.start_date} to {plan.end_date}."
+    )
+
+
+@mcp.tool()
+async def add_training_session(
+    user_id: int,
+    date: str,
+    session_type: str,
+    distance_km: float = 0,
+    pace_target: str = "",
+    description: str = "",
+) -> str:
+    """Add a single session to the user's active training plan.
+
+    Args:
+        user_id: Telegram user ID
+        date: Session date YYYY-MM-DD
+        session_type: One of easy, rest, tempo, intervals, strides, long, race
+        distance_km: Distance in km
+        pace_target: Target pace
+        description: Session description
+    """
+    date_val = datetime.date.fromisoformat(date)
+    async with async_session_factory() as session:
+        ts = await add_session_to_plan(
+            session,
+            user_id=user_id,
+            date_val=date_val,
+            session_type=session_type,
+            distance_km=distance_km,
+            pace_target=pace_target,
+            description=description,
+        )
+    if not ts:
+        return "No active training plan. Create one first!"
+    return f"Session added (ID {ts.id}): {ts.date} | {ts.description}"
+
+
+@mcp.tool()
+async def update_training_session(
+    user_id: int,
+    session_id: int,
+    date: str | None = None,
+    session_type: str | None = None,
+    distance_km: float | None = None,
+    pace_target: str | None = None,
+    description: str | None = None,
+) -> str:
+    """Update a session in the active plan by its session ID.
+
+    Args:
+        user_id: Telegram user ID
+        session_id: ID of the training session to update
+        date: New date YYYY-MM-DD
+        session_type: New session type
+        distance_km: New distance in km
+        pace_target: New target pace
+        description: New description
+    """
+    updates = {}
+    if date is not None:
+        updates["date"] = date
+    if session_type is not None:
+        updates["session_type"] = session_type
+    if distance_km is not None:
+        updates["distance_km"] = distance_km
+    if pace_target is not None:
+        updates["pace_target"] = pace_target
+    if description is not None:
+        updates["description"] = description
+
+    async with async_session_factory() as session:
+        ok = await update_session(session, user_id=user_id, session_id=session_id, **updates)
+    if ok:
+        return f"Session {session_id} updated."
+    return f"Session {session_id} not found in your active plan."
+
+
+@mcp.tool()
+async def delete_training_session(user_id: int, session_id: int) -> str:
+    """Delete a session from the active plan by its session ID.
+
+    Args:
+        user_id: Telegram user ID
+        session_id: ID of the training session to delete
+    """
+    async with async_session_factory() as session:
+        ok = await delete_session(session, user_id=user_id, session_id=session_id)
+    if ok:
+        return f"Session {session_id} deleted."
+    return f"Session {session_id} not found in your active plan."
 
 
 def main() -> None:

@@ -13,7 +13,7 @@ from src.llm.tools import TOOL_SCHEMAS, execute_tool
 
 logger = logging.getLogger(__name__)
 
-MAX_AGENT_ITERATIONS = 5
+MAX_AGENT_ITERATIONS = 8
 
 
 class GroqLLM(BaseLLM):
@@ -86,7 +86,7 @@ class GroqLLM(BaseLLM):
                     tools=TOOL_SCHEMAS,
                     tool_choice="auto",
                     temperature=0.2,
-                    max_tokens=1500,
+                    max_tokens=4096,
                 )
             except Exception as exc:
                 logger.error("Groq agent call failed (iter %d): %s", iteration, exc)

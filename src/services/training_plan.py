@@ -1,111 +1,85 @@
 from __future__ import annotations
 
+import datetime
+import logging
 from dataclasses import dataclass
 from datetime import date, timedelta
+
+from sqlalchemy import select, update
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
+
+from src.models.training_plan import TrainingPlan, TrainingSession
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
 class PlannedSession:
+    """Read-only view of a training session (kept for backward compat)."""
     date: date
     session_type: str
     distance_km: float
     pace_target: str
     description: str
+    session_id: int | None = None
 
 
-def _build_plan() -> list[PlannedSession]:
-    """Build the 7-week sub-60 10K training plan (Mar 10 – Apr 27, 2026)."""
-    sessions: list[PlannedSession] = []
-
-    def _add(d: date, stype: str, km: float, pace: str, desc: str) -> None:
-        sessions.append(PlannedSession(d, stype, km, pace, desc))
-
-    # Week 1: Mar 10-15 (Build frequency)
-    _add(date(2026, 3, 10), "easy", 3.95, "7:00+/km", "Morning run (done)")
-    _add(date(2026, 3, 11), "rest", 0, "", "Rest day")
-    _add(date(2026, 3, 12), "easy", 4, "7:00+/km", "4 km easy run")
-    _add(date(2026, 3, 13), "rest", 0, "", "Rest day")
-    _add(date(2026, 3, 14), "easy", 5, "7:00+/km", "5 km easy run")
-    _add(date(2026, 3, 15), "long", 6, "7:00+/km", "6 km long run")
-
-    # Week 2: Mar 16-22 (Introduce strides)
-    _add(date(2026, 3, 16), "easy", 4, "7:00+/km", "4 km easy run")
-    _add(date(2026, 3, 17), "rest", 0, "", "Rest day")
-    _add(date(2026, 3, 18), "strides", 4, "7:00+/km", "4 km easy + 4x100m strides")
-    _add(date(2026, 3, 19), "rest", 0, "", "Rest day")
-    _add(date(2026, 3, 20), "easy", 4, "7:00+/km", "4 km easy run")
-    _add(date(2026, 3, 21), "rest", 0, "", "Rest day")
-    _add(date(2026, 3, 22), "long", 7, "7:00+/km", "7 km long run")
-
-    # Week 3: Mar 23-29 (First speed work)
-    _add(date(2026, 3, 23), "easy", 4, "7:00+/km", "4 km easy run")
-    _add(date(2026, 3, 24), "rest", 0, "", "Rest day")
-    _add(date(2026, 3, 25), "intervals", 4.5, "5:30/km", "1.5 km WU + 5x400m @ 5:30/km (90s rest) + 1 km CD")
-    _add(date(2026, 3, 26), "rest", 0, "", "Rest day")
-    _add(date(2026, 3, 27), "easy", 5, "7:00+/km", "5 km easy run")
-    _add(date(2026, 3, 28), "rest", 0, "", "Rest day")
-    _add(date(2026, 3, 29), "long", 8, "7:00+/km", "8 km long run")
-
-    # Week 4: Mar 30 – Apr 5 (Introduce tempo)
-    _add(date(2026, 3, 30), "easy", 4, "7:00+/km", "4 km easy run")
-    _add(date(2026, 3, 31), "rest", 0, "", "Rest day")
-    _add(date(2026, 4, 1), "tempo", 5, "6:00/km", "1.5 km WU + 2 km @ 6:00/km + 1.5 km CD")
-    _add(date(2026, 4, 2), "rest", 0, "", "Rest day")
-    _add(date(2026, 4, 3), "easy", 5, "7:00+/km", "5 km easy run")
-    _add(date(2026, 4, 4), "rest", 0, "", "Rest day")
-    _add(date(2026, 4, 5), "long", 9, "7:00+/km", "9 km long run")
-
-    # Week 5: Apr 6-12 (Peak tempo)
-    _add(date(2026, 4, 6), "easy", 5, "7:00+/km", "5 km easy run")
-    _add(date(2026, 4, 7), "rest", 0, "", "Rest day")
-    _add(date(2026, 4, 8), "tempo", 6, "6:00/km", "1.5 km WU + 3 km @ 6:00/km + 1.5 km CD")
-    _add(date(2026, 4, 9), "rest", 0, "", "Rest day")
-    _add(date(2026, 4, 10), "easy", 5, "7:00+/km", "5 km easy run")
-    _add(date(2026, 4, 11), "rest", 0, "", "Rest day")
-    _add(date(2026, 4, 12), "long", 10, "7:00+/km", "10 km (middle 3 km @ 6:15/km)")
-
-    # Week 6: Apr 13-19 (Race-pace confidence)
-    _add(date(2026, 4, 13), "easy", 4, "7:00+/km", "4 km easy run")
-    _add(date(2026, 4, 14), "rest", 0, "", "Rest day")
-    _add(date(2026, 4, 15), "tempo", 6.5, "6:00/km", "1.5 km WU + 4 km @ 6:00/km + 1 km CD")
-    _add(date(2026, 4, 16), "rest", 0, "", "Rest day")
-    _add(date(2026, 4, 17), "easy", 4, "7:00+/km", "4 km easy run")
-    _add(date(2026, 4, 18), "rest", 0, "", "Rest day")
-    _add(date(2026, 4, 19), "long", 8, "7:00+/km", "8 km easy long run")
-
-    # Week 7: Apr 20-27 (Taper + Race)
-    _add(date(2026, 4, 20), "easy", 3, "7:00+/km", "3 km easy run")
-    _add(date(2026, 4, 21), "rest", 0, "", "Rest day")
-    _add(date(2026, 4, 22), "strides", 3, "7:00+/km", "3 km easy + 4x100m strides")
-    _add(date(2026, 4, 23), "rest", 0, "", "Rest day")
-    _add(date(2026, 4, 24), "easy", 2, "7:00+/km", "2 km shakeout jog")
-    _add(date(2026, 4, 25), "rest", 0, "", "Full rest — lay out race gear")
-    _add(date(2026, 4, 26), "rest", 0, "", "Rest — light food, hydrate, sleep early")
-    _add(date(2026, 4, 27), "race", 10, "6:00/km", "10K RACE DAY — Sub-60 target!")
-
-    return sessions
+def _row_to_planned(row: TrainingSession) -> PlannedSession:
+    return PlannedSession(
+        date=row.date,
+        session_type=row.session_type,
+        distance_km=row.distance_km,
+        pace_target=row.pace_target,
+        description=row.description,
+        session_id=row.id,
+    )
 
 
-TRAINING_PLAN: list[PlannedSession] = _build_plan()
-_PLAN_BY_DATE: dict[date, PlannedSession] = {s.date: s for s in TRAINING_PLAN}
+# ---------------------------------------------------------------------------
+# Read helpers
+# ---------------------------------------------------------------------------
 
-PLAN_START = TRAINING_PLAN[0].date
-PLAN_END = TRAINING_PLAN[-1].date
+async def get_active_plan(session: AsyncSession, user_id: int) -> TrainingPlan | None:
+    stmt = (
+        select(TrainingPlan)
+        .options(selectinload(TrainingPlan.sessions))
+        .where(TrainingPlan.user_id == user_id, TrainingPlan.is_active.is_(True))
+        .order_by(TrainingPlan.created_at.desc())
+        .limit(1)
+    )
+    result = await session.execute(stmt)
+    return result.scalar_one_or_none()
 
 
-def get_session(d: date) -> PlannedSession | None:
-    return _PLAN_BY_DATE.get(d)
+async def get_session(session: AsyncSession, user_id: int, d: date) -> PlannedSession | None:
+    plan = await get_active_plan(session, user_id)
+    if not plan:
+        return None
+    for s in plan.sessions:
+        if s.date == d:
+            return _row_to_planned(s)
+    return None
 
 
-def get_week_sessions(reference_date: date) -> list[PlannedSession]:
-    """Return all planned sessions for the ISO week containing *reference_date*."""
+async def get_week_sessions(session: AsyncSession, user_id: int, reference_date: date) -> list[PlannedSession]:
     monday = reference_date - timedelta(days=reference_date.weekday())
-    return [s for s in TRAINING_PLAN if monday <= s.date < monday + timedelta(days=7)]
+    sunday = monday + timedelta(days=7)
+    plan = await get_active_plan(session, user_id)
+    if not plan:
+        return []
+    return [_row_to_planned(s) for s in plan.sessions if monday <= s.date < sunday]
 
 
-def get_week_number(d: date) -> int:
-    """1-based training week number (Week 1 starts Mar 9, 2026 — the Monday of plan start)."""
-    plan_monday = PLAN_START - timedelta(days=PLAN_START.weekday())
+async def get_all_sessions(session: AsyncSession, user_id: int) -> list[PlannedSession]:
+    plan = await get_active_plan(session, user_id)
+    if not plan:
+        return []
+    return [_row_to_planned(s) for s in plan.sessions]
+
+
+def get_week_number(plan_start: date, d: date) -> int:
+    plan_monday = plan_start - timedelta(days=plan_start.weekday())
     delta = (d - plan_monday).days
     if delta < 0:
         return 0
@@ -118,3 +92,136 @@ def get_planned_distance(sessions: list[PlannedSession]) -> float:
 
 def get_planned_run_count(sessions: list[PlannedSession]) -> int:
     return sum(1 for s in sessions if s.session_type != "rest")
+
+
+# ---------------------------------------------------------------------------
+# Write operations
+# ---------------------------------------------------------------------------
+
+async def create_plan(
+    session: AsyncSession,
+    *,
+    user_id: int,
+    name: str,
+    goal: str,
+    start_date: date,
+    end_date: date,
+    sessions_data: list[dict],
+) -> TrainingPlan:
+    """Create a new training plan, deactivating any existing active plan."""
+    await _deactivate_plans(session, user_id)
+
+    plan = TrainingPlan(
+        user_id=user_id,
+        name=name,
+        goal=goal,
+        start_date=start_date,
+        end_date=end_date,
+        is_active=True,
+    )
+    session.add(plan)
+    await session.flush()
+
+    for s in sessions_data:
+        ts = TrainingSession(
+            plan_id=plan.id,
+            date=datetime.date.fromisoformat(s["date"]) if isinstance(s["date"], str) else s["date"],
+            session_type=s["session_type"],
+            distance_km=s.get("distance_km", 0),
+            pace_target=s.get("pace_target", ""),
+            description=s.get("description", ""),
+        )
+        session.add(ts)
+
+    await session.commit()
+    await session.refresh(plan)
+    return plan
+
+
+async def add_session_to_plan(
+    session: AsyncSession,
+    *,
+    user_id: int,
+    date_val: date,
+    session_type: str,
+    distance_km: float = 0,
+    pace_target: str = "",
+    description: str = "",
+) -> TrainingSession | None:
+    plan = await get_active_plan(session, user_id)
+    if not plan:
+        return None
+
+    ts = TrainingSession(
+        plan_id=plan.id,
+        date=date_val,
+        session_type=session_type,
+        distance_km=distance_km,
+        pace_target=pace_target,
+        description=description,
+    )
+    session.add(ts)
+    await session.commit()
+    await session.refresh(ts)
+    return ts
+
+
+async def update_session(
+    session: AsyncSession,
+    *,
+    user_id: int,
+    session_id: int,
+    **updates: object,
+) -> bool:
+    plan = await get_active_plan(session, user_id)
+    if not plan:
+        return False
+
+    plan_session_ids = {s.id for s in plan.sessions}
+    if session_id not in plan_session_ids:
+        return False
+
+    allowed = {"date", "session_type", "distance_km", "pace_target", "description"}
+    filtered = {k: v for k, v in updates.items() if k in allowed and v is not None}
+    if not filtered:
+        return False
+
+    if "date" in filtered and isinstance(filtered["date"], str):
+        filtered["date"] = datetime.date.fromisoformat(filtered["date"])
+
+    stmt = (
+        update(TrainingSession)
+        .where(TrainingSession.id == session_id)
+        .values(**filtered)
+    )
+    await session.execute(stmt)
+    await session.commit()
+    return True
+
+
+async def delete_session(
+    session: AsyncSession,
+    *,
+    user_id: int,
+    session_id: int,
+) -> bool:
+    plan = await get_active_plan(session, user_id)
+    if not plan:
+        return False
+
+    target = next((s for s in plan.sessions if s.id == session_id), None)
+    if not target:
+        return False
+
+    await session.delete(target)
+    await session.commit()
+    return True
+
+
+async def _deactivate_plans(session: AsyncSession, user_id: int) -> None:
+    stmt = (
+        update(TrainingPlan)
+        .where(TrainingPlan.user_id == user_id, TrainingPlan.is_active.is_(True))
+        .values(is_active=False)
+    )
+    await session.execute(stmt)

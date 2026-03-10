@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import async_engine_from_config
 from src.config import settings
 from src.db.session import Base
 from src.models.reminder import Reminder  # noqa: F401
+from src.models.training_plan import TrainingPlan, TrainingSession  # noqa: F401
 
 config = context.config
 if config.config_file_name is not None:

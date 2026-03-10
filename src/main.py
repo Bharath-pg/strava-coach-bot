@@ -47,7 +47,7 @@ async def weekly_checkin_job(app) -> None:  # type: ignore[no-untyped-def]
         return
     for uid in settings.allowed_users:
         try:
-            await send_weekly_checkin(app, chat_id=uid)
+            await send_weekly_checkin(app, chat_id=uid, user_id=uid)
         except Exception:
             logger.exception("Failed to send weekly check-in to %d", uid)
 

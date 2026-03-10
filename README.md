@@ -11,13 +11,13 @@ The bot uses Groq's `llama-3.3-70b` with native function calling to autonomously
 ## How It Works
 
 ```
-You: "How was my run today?"
+You: "Create a 5K plan for sub-25 starting next Monday"
 
-Bot calls: get_run_details(date="2026-03-10")
-Bot calls: get_training_plan(date="2026-03-10")
+Bot calls: create_training_plan(name="Sub-25 5K Plan", goal="...", sessions=[...42 sessions...])
 
-Bot: "You ran 3.95 km in 25m 7s at 6:21/km pace -- faster than
-      your 7:00+/km target. Great job on your Week 1 easy run!"
+Bot: "Your new training plan 'Sub-25 5K Plan' has been created!
+      42 sessions, 30 runs, 199 km total from Mar 17 to Apr 27.
+      Includes progressive overload, tempo work, and a taper week."
 ```
 
 The LLM receives a set of tool schemas and decides on its own what to call. It can chain multiple tools per message, observe results, and formulate a single natural response.
@@ -34,9 +34,9 @@ The LLM receives a set of tool schemas and decides on its own what to call. It c
 
 - **Agentic LLM** -- the model decides what tools to call, not hardcoded routing. Chains multiple tools per message when needed.
 - **Strava Integration** -- live activity data via OAuth2. Fetches runs, compares pace/distance against plan, generates weekly reports.
-- **Training Plan** -- 7-week sub-60 10K plan with per-day session lookup and progress tracking.
+- **DB-Backed Training Plans** -- create full training plans via natural language ("Create a 10K plan for sub-60 by April 27"). Plans are stored in PostgreSQL with full CRUD: add, edit, and delete individual sessions.
 - **Reminders** -- set one-time or recurring reminders (daily/weekly/monthly) delivered on schedule.
-- **MCP Server** -- all 7 tools exposed via Model Context Protocol for external LLM clients (Cursor, Claude Desktop).
+- **MCP Server** -- all 11 tools exposed via Model Context Protocol for external LLM clients (Cursor, Claude Desktop).
 - **Deployed on Railway** -- auto-deploys on push to `main`, runs 24/7.
 
 ---
@@ -48,23 +48,24 @@ User Message
      │
      ▼
 ┌─────────────────────────────────────────┐
-│           Agent Loop (max 5 iters)       │
-│  Groq llama-3.3-70b + tool_choice=auto  │
-│                                          │
-│  1. Send message + 7 tool schemas        │
-│  2. LLM returns tool_calls[]             │
-│  3. Execute tools, feed results back     │
-│  4. Repeat until final text response     │
+│          Agent Loop (max 8 iters)       │
+│  Groq llama-3.3-70b + tool_choice=auto │
+│                                         │
+│  1. Send message + 11 tool schemas      │
+│  2. LLM returns tool_calls[]            │
+│  3. Execute tools, feed results back    │
+│  4. Repeat until final text response    │
 └──────────────┬──────────────────────────┘
                │ tool calls
     ┌──────────┼──────────┐
     ▼          ▼          ▼
  Strava    Reminders   Training
- Service   Service     Plan
-    │          │
-    ▼          ▼
- Strava    PostgreSQL
-  API
+ Service   Service     Plan Service
+    │          │          │
+    ▼          ▼          ▼
+ Strava      PostgreSQL
+  API       (reminders +
+           training plans)
 ```
 
 Key design decisions:
@@ -80,8 +81,10 @@ See [ARCHITECTURE.md](ARCHITECTURE.md) for a full deep dive.
 
 | You say | Bot does | Bot responds |
 |---------|----------|--------------|
+| "Create a 5K plan for sub-25 starting next Monday" | `create_training_plan(...)` | "Your Sub-25 5K Plan is ready! 42 sessions, 30 runs, 199 km." |
 | "What should I run today?" | `get_training_plan(today)` | "Today's plan: 4 km easy run at 7:00+/km pace." |
 | "How was my run yesterday?" | `get_run_details(yesterday)` + `get_training_plan(yesterday)` | "You ran 3.95 km at 6:21/km -- ahead of the 7:00/km target!" |
+| "Move Thursday's run to Friday" | `update_training_session(...)` | "Done! Session moved to Friday." |
 | "How's my training this week?" | `get_training_status()` | "1/4 runs done, 3.95/18.95 km. Thu, Sat, Sun still ahead." |
 | "Show my runs from last week" | `get_strava_activities(last_week)` | Lists all activities with distance, time, pace |
 | "Remind me to stretch at 7am daily" | `set_reminder(...)` | "Reminder set: stretch at 07:00 (repeats daily)" |
@@ -176,7 +179,7 @@ To get your `STRAVA_REFRESH_TOKEN`:
 
 ## MCP Server
 
-Exposes 7 tools via stdio transport for external LLM clients:
+Exposes 11 tools via stdio transport for external LLM clients:
 
 ```bash
 python -m src.mcp.server
@@ -188,6 +191,10 @@ python -m src.mcp.server
 | `get_run_details` | Run data for a specific day vs training plan |
 | `get_training_plan` | Planned session for a date |
 | `get_training_status` | Weekly check-in: actual vs planned |
+| `create_training_plan` | Create a full training plan with all sessions |
+| `add_training_session` | Add a session to the active plan |
+| `update_training_session` | Edit a session by ID |
+| `delete_training_session` | Delete a session by ID |
 | `set_reminder` | Create a reminder |
 | `list_reminders` | List active reminders |
 | `cancel_reminder` | Cancel a reminder by ID |
@@ -201,14 +208,16 @@ src/
 ├── main.py                    # Bot entrypoint, scheduler setup
 ├── config.py                  # Pydantic settings from .env
 ├── db/session.py              # Async SQLAlchemy engine
-├── models/reminder.py         # Reminder ORM model
+├── models/
+│   ├── reminder.py            # Reminder ORM model
+│   └── training_plan.py       # TrainingPlan + TrainingSession ORM models
 ├── services/
 │   ├── strava.py              # Strava API client (OAuth2)
-│   ├── training_plan.py       # 7-week 10K training plan
+│   ├── training_plan.py       # DB-backed training plan CRUD
 │   ├── weekly_checkin.py      # Plan vs actual comparison
 │   └── reminder.py            # Reminder CRUD + scheduling
 ├── llm/
-│   ├── tools.py               # 7 tool schemas + executor
+│   ├── tools.py               # 11 tool schemas + executor
 │   ├── groq_llm.py            # Agent loop with tool-calling
 │   ├── prompts.py             # System prompt
 │   ├── base.py                # Abstract LLM interface
