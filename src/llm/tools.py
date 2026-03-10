@@ -259,8 +259,10 @@ TOOL_SCHEMAS: list[dict] = [
 # Tool executor -- maps tool names to service-layer calls
 # ---------------------------------------------------------------------------
 
-async def execute_tool(name: str, args: dict, user_id: int) -> str:
+async def execute_tool(name: str, args: dict | None, user_id: int) -> str:
     """Execute a tool by name, injecting user_id, and return a string result."""
+    if args is None:
+        args = {}
     try:
         executor = _TOOL_EXECUTORS.get(name)
         if not executor:
