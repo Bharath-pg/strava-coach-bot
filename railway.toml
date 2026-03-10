@@ -4,6 +4,6 @@ dockerfilePath = "Dockerfile"
 buildTarget = "bot"
 
 [deploy]
-startCommand = "python -u -m src.main"
+startCommand = "alembic upgrade head && python -u -m src.main"
 restartPolicyType = "ON_FAILURE"
 restartPolicyMaxRetries = 5
