@@ -3,8 +3,9 @@ from __future__ import annotations
 import datetime
 import json
 import logging
+import re
 
-from groq import AsyncGroq
+from groq import AsyncGroq, RateLimitError
 
 from src.config import settings
 from src.llm.base import BaseLLM
@@ -14,6 +15,14 @@ from src.llm.tools import TOOL_SCHEMAS, execute_tool
 logger = logging.getLogger(__name__)
 
 MAX_AGENT_ITERATIONS = 8
+
+_RETRY_RE = re.compile(r"try again in (\d+m[\d.]+s|\d+[\d.]*s)")
+
+
+def _rate_limit_message(error_text: str) -> str:
+    match = _RETRY_RE.search(error_text)
+    wait = match.group(1) if match else "a few minutes"
+    return f"I've hit my daily API limit. Try again in ~{wait}."
 
 
 class GroqLLM(BaseLLM):
@@ -88,6 +97,9 @@ class GroqLLM(BaseLLM):
                     temperature=0.2,
                     max_tokens=4096,
                 )
+            except RateLimitError as exc:
+                logger.warning("Groq rate limit hit (iter %d): %s", iteration, exc)
+                return _rate_limit_message(str(exc))
             except Exception as exc:
                 logger.error("Groq agent call failed (iter %d): %s", iteration, exc)
                 return "Sorry, I'm having trouble processing that right now."
