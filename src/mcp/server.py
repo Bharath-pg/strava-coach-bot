@@ -1,135 +1,34 @@
-"""MCP server exposing expense and reminder tools via stdio transport."""
+"""MCP server exposing reminder and Strava tools via stdio transport."""
 from __future__ import annotations
 
-import asyncio
 import datetime
 import logging
-from decimal import Decimal
 
 from mcp.server.fastmcp import FastMCP
 
 from src.db.session import async_session_factory
-from src.services.expense import (
-    add_expense as svc_add_expense,
-)
-from src.services.expense import (
-    expense_summary as svc_expense_summary,
-)
-from src.services.expense import (
-    period_to_dates,
-)
-from src.services.expense import (
-    query_expenses as svc_query_expenses,
-)
 from src.services.reminder import (
     cancel_reminder as svc_cancel_reminder,
-)
-from src.services.reminder import (
     list_reminders as svc_list_reminders,
-)
-from src.services.reminder import (
     set_reminder as svc_set_reminder,
 )
+from src.services.strava import get_activities, get_day_activities
+from src.services.training_plan import (
+    get_session as get_plan_session,
+    get_week_number,
+    get_week_sessions,
+)
+from src.services.weekly_checkin import generate_weekly_checkin
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-mcp = FastMCP("personal-assistant")
+mcp = FastMCP("strava-coach")
 
 
-@mcp.tool()
-async def add_expense(
-    user_id: int,
-    amount: float,
-    currency: str = "USD",
-    category: str = "other",
-    description: str = "",
-    date: str | None = None,
-) -> str:
-    """Record a new expense for a user.
-
-    Args:
-        user_id: Telegram user ID
-        amount: Expense amount
-        currency: 3-letter currency code (default USD)
-        category: Expense category
-        description: Free-text description
-        date: Date in YYYY-MM-DD format (default today)
-    """
-    expense_date = datetime.date.fromisoformat(date) if date else datetime.date.today()
-    async with async_session_factory() as session:
-        exp = await svc_add_expense(
-            session,
-            user_id=user_id,
-            amount=Decimal(str(amount)),
-            currency=currency,
-            category=category,
-            description=description,
-            date=expense_date,
-        )
-    return f"Expense #{exp.id}: {exp.amount} {exp.currency} | {exp.category} | {exp.date}"
-
-
-@mcp.tool()
-async def query_expenses(
-    user_id: int,
-    category: str | None = None,
-    start_date: str | None = None,
-    end_date: str | None = None,
-    limit: int = 20,
-) -> str:
-    """Query expenses with optional filters.
-
-    Args:
-        user_id: Telegram user ID
-        category: Filter by category
-        start_date: Start date (YYYY-MM-DD)
-        end_date: End date (YYYY-MM-DD)
-        limit: Max results (default 20)
-    """
-    sd = datetime.date.fromisoformat(start_date) if start_date else None
-    ed = datetime.date.fromisoformat(end_date) if end_date else None
-
-    async with async_session_factory() as session:
-        expenses = await svc_query_expenses(
-            session, user_id=user_id, category=category, start_date=sd, end_date=ed, limit=limit
-        )
-
-    if not expenses:
-        return "No matching expenses found."
-
-    lines = [f"Found {len(expenses)} expenses:"]
-    for e in expenses:
-        lines.append(f"  [{e.id}] {e.date} | ${e.amount} | {e.category} | {e.description}")
-    return "\n".join(lines)
-
-
-@mcp.tool()
-async def expense_summary(
-    user_id: int,
-    period: str = "month",
-) -> str:
-    """Get an aggregated spending summary grouped by category.
-
-    Args:
-        user_id: Telegram user ID
-        period: One of today, week, month, year, all
-    """
-    start_date, end_date = period_to_dates(period)
-    async with async_session_factory() as session:
-        summary = await svc_expense_summary(
-            session, user_id=user_id, start_date=start_date, end_date=end_date
-        )
-
-    if not summary["categories"]:
-        return f"No expenses for period: {period}"
-
-    lines = [f"Summary ({period}): {start_date} to {end_date}"]
-    for cat, data in summary["categories"].items():
-        lines.append(f"  {cat}: ${data['total']:.2f} ({data['count']} items)")
-    lines.append(f"Total: ${summary['grand_total']:.2f}")
-    return "\n".join(lines)
-
+# ---------------------------------------------------------------------------
+# Reminder tools
+# ---------------------------------------------------------------------------
 
 @mcp.tool()
 async def set_reminder(
@@ -195,9 +94,121 @@ async def cancel_reminder(user_id: int, reminder_id: int) -> str:
     return f"Reminder {reminder_id} not found or already cancelled."
 
 
+# ---------------------------------------------------------------------------
+# Strava / Training tools
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+async def get_strava_activities(
+    after_date: str | None = None,
+    before_date: str | None = None,
+    activity_type: str = "Run",
+) -> str:
+    """Fetch Strava running activities within a date range.
+
+    Args:
+        after_date: Start date YYYY-MM-DD
+        before_date: End date YYYY-MM-DD
+        activity_type: Strava activity type filter (default Run)
+    """
+    after = datetime.date.fromisoformat(after_date) if after_date else None
+    before = datetime.date.fromisoformat(before_date) if before_date else None
+    activities = await get_activities(after=after, before=before, activity_type=activity_type)
+
+    if not activities:
+        return "No activities found for the given period."
+
+    lines = [f"Found {len(activities)} activities:"]
+    for a in activities:
+        lines.append(
+            f"  {a.start_date:%Y-%m-%d} | {a.name} | {a.distance_km} km "
+            f"| {a.moving_time_formatted} | {a.pace_per_km}"
+        )
+    return "\n".join(lines)
+
+
+@mcp.tool()
+async def get_run_details(date: str | None = None) -> str:
+    """Get details of runs recorded on a specific date, compared against the training plan.
+
+    Args:
+        date: Date in YYYY-MM-DD format (default today)
+    """
+    target_date = datetime.date.fromisoformat(date) if date else datetime.date.today()
+    planned = get_plan_session(target_date)
+
+    try:
+        activities = await get_day_activities(target_date)
+    except Exception:
+        return "Could not fetch Strava data. Check API credentials."
+
+    day_label = target_date.strftime("%A, %b %d")
+    if not activities:
+        plan_text = f"\nPlanned: {planned.description}" if planned else ""
+        return f"No runs recorded on {day_label}.{plan_text}"
+
+    lines = [f"Runs on {day_label}:"]
+    for act in activities:
+        lines.append(
+            f"  {act.name}: {act.distance_km} km in {act.moving_time_formatted} | {act.pace_per_km}"
+        )
+        if planned and planned.session_type != "rest":
+            dist_diff = act.distance_km - planned.distance_km
+            sign = "+" if dist_diff > 0 else ""
+            lines.append(f"  Plan: {planned.description} | Distance vs plan: {sign}{dist_diff:.1f} km")
+            if planned.pace_target:
+                lines.append(f"  Pace target: {planned.pace_target} | Actual: {act.pace_per_km}")
+    return "\n".join(lines)
+
+
+@mcp.tool()
+async def get_training_plan(date: str | None = None) -> str:
+    """Get the planned training session for a specific date.
+
+    Args:
+        date: Date in YYYY-MM-DD format (default today)
+    """
+    target_date = datetime.date.fromisoformat(date) if date else datetime.date.today()
+    session = get_plan_session(target_date)
+
+    if not session:
+        return f"No plan data for {target_date.strftime('%A, %b %d')}."
+
+    day_label = target_date.strftime("%A, %b %d")
+    week_num = get_week_number(target_date)
+
+    if session.session_type == "rest":
+        return f"{day_label} (Week {week_num}): Rest day. {session.description}"
+
+    lines = [
+        f"{day_label} (Week {week_num}):",
+        f"  {session.description}",
+        f"  Distance: {session.distance_km} km | Pace: {session.pace_target} | Type: {session.session_type}",
+    ]
+
+    week_sessions = get_week_sessions(target_date)
+    remaining = [s for s in week_sessions if s.date > target_date and s.session_type != "rest"]
+    if remaining:
+        lines.append("Upcoming this week:")
+        for s in remaining:
+            lines.append(f"  {s.date:%a} | {s.description}")
+    return "\n".join(lines)
+
+
+@mcp.tool()
+async def get_training_status(reference_date: str | None = None) -> str:
+    """Get a weekly training check-in comparing actual Strava activities against the plan.
+
+    Args:
+        reference_date: Any date within the target week (YYYY-MM-DD). Defaults to today.
+    """
+    ref = datetime.date.fromisoformat(reference_date) if reference_date else None
+    return await generate_weekly_checkin(ref)
+
+
 def main() -> None:
     logger.info("Starting MCP server (stdio)...")
-    asyncio.run(mcp.run_async(transport="stdio"))
+    mcp.run(transport="stdio")
 
 
 if __name__ == "__main__":

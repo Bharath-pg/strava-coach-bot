@@ -8,9 +8,15 @@ from pydantic_settings import BaseSettings
 class Settings(BaseSettings):
     telegram_bot_token: str = ""
     gemini_api_key: str = ""
+    groq_api_key: str = ""
+    llm_provider: str = "groq"
     database_url: str = "postgresql+asyncpg://assistant:assistant@localhost:5432/assistant_db"
     allowed_user_ids: str = ""
     log_level: str = "INFO"
+
+    strava_client_id: str = ""
+    strava_client_secret: str = ""
+    strava_refresh_token: str = ""
 
     @property
     def allowed_users(self) -> set[int]:

@@ -8,7 +8,6 @@ import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from src.db.session import Base
-from src.models.expense import Expense  # noqa: F401
 from src.models.reminder import Reminder  # noqa: F401
 
 TEST_DATABASE_URL = "sqlite+aiosqlite:///:memory:"

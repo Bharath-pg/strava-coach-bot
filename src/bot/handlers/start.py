@@ -4,16 +4,21 @@ from telegram import Update
 from telegram.ext import ContextTypes
 
 WELCOME_TEXT = (
-    "Hey! I'm your personal assistant bot.\n\n"
-    "I can help you with:\n"
-    "  - Tracking expenses\n"
-    "  - Setting reminders\n\n"
-    "Just type naturally, or use commands:\n"
-    "/expense <amount> <description> -- add an expense\n"
-    "/summary [today|week|month] -- spending summary\n"
-    "/remind <message> at <time> -- set a reminder\n"
-    "/reminders -- list reminders\n"
-    "/cancel <id> -- cancel a reminder\n"
+    "Hey! I'm your running coach & assistant bot.\n\n"
+    "Just talk to me naturally -- I'll figure out what to do.\n\n"
+    "Things I can help with:\n"
+    "  - Training plan: what to run today, this week\n"
+    "  - Run details: how your runs compare to the plan\n"
+    "  - Strava: activity history, weekly check-in\n"
+    "  - Reminders: set, list, cancel\n\n"
+    "Examples:\n"
+    '  "What should I run today?"\n'
+    '  "How was my run yesterday?"\n'
+    '  "How is my training going this week?"\n'
+    '  "Show me my runs from last week"\n'
+    '  "Remind me to stretch at 7am daily"\n\n'
+    "Slash commands:\n"
+    "  /remind /reminders /cancel\n\n"
     "/help -- show this message"
 )
 

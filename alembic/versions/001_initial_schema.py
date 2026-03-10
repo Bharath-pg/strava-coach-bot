@@ -19,25 +19,6 @@ depends_on: Union[str, Sequence[str], None] = None
 
 def upgrade() -> None:
     op.create_table(
-        "expenses",
-        sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
-        sa.Column("user_id", sa.BigInteger(), nullable=False),
-        sa.Column("amount", sa.Numeric(12, 2), nullable=False),
-        sa.Column("currency", sa.String(3), nullable=False, server_default="USD"),
-        sa.Column("category", sa.String(50), nullable=False, server_default="other"),
-        sa.Column("description", sa.String(500), nullable=False, server_default=""),
-        sa.Column("date", sa.Date(), nullable=False),
-        sa.Column(
-            "created_at",
-            sa.DateTime(timezone=True),
-            server_default=sa.func.now(),
-            nullable=False,
-        ),
-        sa.PrimaryKeyConstraint("id"),
-    )
-    op.create_index("ix_expenses_user_id", "expenses", ["user_id"])
-
-    op.create_table(
         "reminders",
         sa.Column("id", sa.Integer(), autoincrement=True, nullable=False),
         sa.Column("user_id", sa.BigInteger(), nullable=False),
@@ -59,5 +40,3 @@ def upgrade() -> None:
 def downgrade() -> None:
     op.drop_index("ix_reminders_user_id", table_name="reminders")
     op.drop_table("reminders")
-    op.drop_index("ix_expenses_user_id", table_name="expenses")
-    op.drop_table("expenses")

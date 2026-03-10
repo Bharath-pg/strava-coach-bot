@@ -1,13 +1,14 @@
-# Personal Assistant Telegram Bot
+# Strava Coach Bot
 
-A Telegram bot for expense tracking and reminders, powered by Google Gemini for natural language understanding. Includes an MCP server for tool integration.
+An agentic Telegram running coach powered by Strava, LLM tool-calling, and MCP. The bot autonomously decides which tools to invoke, chains multiple calls, and composes natural responses -- no hardcoded intent routing.
 
 ## Features
 
-- **Expense Tracking** -- add, query, and summarize expenses via natural language or commands
+- **Agentic LLM** -- Groq (llama-3.3-70b) with native tool-calling; the model decides what to do, not if/else routing
+- **Strava Integration** -- live activity data, pace/distance comparisons, weekly check-ins
+- **Training Plan** -- 7-week sub-60 10K plan with daily session lookup
 - **Reminders** -- set one-time or recurring reminders that the bot delivers on schedule
-- **Natural Language** -- speak naturally; Gemini parses your intent ("I spent $30 on lunch" just works)
-- **MCP Server** -- expose all tools via Model Context Protocol for external LLM integrations
+- **MCP Server** -- expose all 7 tools via Model Context Protocol for external LLM integrations (Cursor, Claude Desktop)
 
 ## Quick Start
 
@@ -16,32 +17,10 @@ A Telegram bot for expense tracking and reminders, powered by Google Gemini for 
 - Python 3.12+
 - PostgreSQL 16+ (or use Docker)
 - A [Telegram Bot Token](https://core.telegram.org/bots#botfather)
-- A [Google Gemini API Key](https://aistudio.google.com/apikey) (free tier)
+- A [Groq API Key](https://console.groq.com/keys) (free tier)
+- [Strava API credentials](https://www.strava.com/settings/api)
 
-### Local Development
-
-```bash
-# Clone and enter
-git clone <your-repo-url>
-cd personal-assistant-bot
-
-# Create virtualenv and install
-python -m venv .venv
-source .venv/bin/activate
-pip install -e ".[dev]"
-
-# Configure environment
-cp .env.example .env
-# Edit .env with your tokens
-
-# Run database migrations
-alembic upgrade head
-
-# Start the bot
-python -m src.main
-```
-
-### Docker
+### Docker (recommended)
 
 ```bash
 cp .env.example .env
@@ -50,46 +29,64 @@ cp .env.example .env
 docker compose up --build
 ```
 
+### Local Development
+
+```bash
+git clone <your-repo-url>
+cd strava-coach-bot
+
+python -m venv .venv
+source .venv/bin/activate
+pip install -e ".[dev]"
+
+cp .env.example .env
+# Edit .env with your tokens
+
+alembic upgrade head
+python -m src.main
+```
+
 ## Usage
+
+Just talk to the bot naturally:
+
+- "What should I run today?"
+- "How was my run yesterday?"
+- "How is my training going this week?"
+- "Show me my runs from last week"
+- "Remind me to stretch at 7am daily"
 
 ### Commands
 
 | Command | Description |
 |---------|-------------|
-| `/start` | Welcome message and quick guide |
-| `/help` | List all commands |
-| `/expense <description>` | Add an expense (e.g. `/expense $50 dinner`) |
-| `/summary [period]` | Spending summary (today/week/month/all) |
-| `/remind <message> at <time>` | Set a reminder |
+| `/start` | Welcome message |
+| `/help` | Usage guide |
+| `/remind` | Set a reminder |
 | `/reminders` | List active reminders |
 | `/cancel <id>` | Cancel a reminder |
 
-### Natural Language
-
-Just type naturally -- the bot understands:
-
-- "I spent 45 dollars on groceries yesterday"
-- "Remind me to call the dentist tomorrow at 3pm"
-- "How much did I spend on food this week?"
-- "Show my expenses for March"
-
 ## MCP Server
 
-The bot exposes an MCP server for external tool integration:
+Exposes 7 tools via stdio transport for external LLM clients:
 
 ```bash
 python -m src.mcp.server
 ```
 
-Available tools: `add_expense`, `query_expenses`, `expense_summary`, `set_reminder`, `list_reminders`, `cancel_reminder`
+**Strava tools**: `get_strava_activities`, `get_run_details`, `get_training_plan`, `get_training_status`
+**Reminder tools**: `set_reminder`, `list_reminders`, `cancel_reminder`
 
 ## Environment Variables
 
 | Variable | Required | Description |
 |----------|----------|-------------|
 | `TELEGRAM_BOT_TOKEN` | Yes | Bot token from BotFather |
-| `GEMINI_API_KEY` | Yes | Google Gemini API key |
+| `GROQ_API_KEY` | Yes | Groq API key |
 | `DATABASE_URL` | Yes | PostgreSQL connection string |
+| `STRAVA_CLIENT_ID` | Yes | Strava API app client ID |
+| `STRAVA_CLIENT_SECRET` | Yes | Strava API app client secret |
+| `STRAVA_REFRESH_TOKEN` | Yes | Strava OAuth refresh token (with `activity:read_all` scope) |
 | `ALLOWED_USER_IDS` | No | Comma-separated Telegram user IDs to restrict access |
 | `LOG_LEVEL` | No | Logging level (default: INFO) |
 
@@ -99,13 +96,21 @@ Available tools: `add_expense`, `query_expenses`, `expense_summary`, `set_remind
 src/
 ├── main.py              # Bot entrypoint
 ├── config.py            # Settings from environment
-├── bot/handlers/        # Telegram command & message handlers
-├── llm/                 # LLM integration (Gemini)
-├── models/              # SQLAlchemy ORM models
-├── services/            # Business logic
-├── mcp/                 # MCP server
+├── bot/handlers/        # Telegram command handlers
+├── bot/conversation.py  # NL catch-all → agent loop
+├── llm/tools.py         # 7 tool schemas + executor
+├── llm/groq_llm.py      # Agent loop with tool-calling
+├── services/strava.py   # Strava API client
+├── services/training_plan.py  # 10K training plan
+├── services/weekly_checkin.py # Plan vs actual comparison
+├── services/reminder.py # Reminder CRUD
+├── mcp/server.py        # MCP server (stdio)
 └── db/                  # Database session management
 ```
+
+## Architecture
+
+See [ARCHITECTURE.md](ARCHITECTURE.md) for a full technical deep dive covering the agentic design, tool-calling flow, Strava integration, and every design decision.
 
 ## License
 

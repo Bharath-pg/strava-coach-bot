@@ -29,6 +29,9 @@ services:
     command: >
       sh -c "alembic upgrade head && python -m src.main"
 
+  # MCP server uses stdio transport -- it's invoked on-demand by MCP clients
+  # (Cursor, Claude Desktop, etc.), not run as a persistent service.
+  # To start manually: docker-compose run --rm mcp-server
   mcp-server:
     build:
       context: .
@@ -39,7 +42,9 @@ services:
     env_file: .env
     environment:
       DATABASE_URL: postgresql+asyncpg://assistant:assistant@postgres:5432/assistant_db
-    restart: unless-stopped
+    stdin_open: true
+    profiles:
+      - mcp
 
 volumes:
   pgdata:

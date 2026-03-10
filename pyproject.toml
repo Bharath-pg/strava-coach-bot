@@ -1,7 +1,7 @@
 [project]
-name = "personal-assistant-bot"
+name = "strava-coach-bot"
 version = "0.1.0"
-description = "Telegram personal assistant bot with expense tracking, reminders, and LLM-powered natural language parsing"
+description = "Agentic Telegram running coach powered by Strava, LLM tool-calling, and MCP"
 requires-python = ">=3.12"
 dependencies = [
     "python-telegram-bot>=21.0",
@@ -10,6 +10,7 @@ dependencies = [
     "alembic>=1.14",
     "pydantic-settings>=2.0",
     "google-genai>=1.0",
+    "groq>=0.12",
     "apscheduler>=3.10,<4.0",
     "mcp[cli]>=1.0",
     "httpx>=0.27",

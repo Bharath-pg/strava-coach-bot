@@ -9,7 +9,6 @@ from sqlalchemy.ext.asyncio import async_engine_from_config
 
 from src.config import settings
 from src.db.session import Base
-from src.models.expense import Expense  # noqa: F401
 from src.models.reminder import Reminder  # noqa: F401
 
 config = context.config
