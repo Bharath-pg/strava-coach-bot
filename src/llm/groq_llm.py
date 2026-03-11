@@ -26,9 +26,13 @@ FALLBACK_MODELS = [
 _RETRY_RE = re.compile(r"try again in (\d+m[\d.]+s|\d+[\d.]*s)")
 
 
-def _rate_limit_message(error_text: str) -> str:
+def _parse_retry_time(error_text: str) -> str:
     match = _RETRY_RE.search(error_text)
-    wait = match.group(1) if match else "a few minutes"
+    return match.group(1) if match else "a few minutes"
+
+
+def _rate_limit_message(error_text: str) -> str:
+    wait = _parse_retry_time(error_text)
     return f"I've hit my daily API limit. Try again in ~{wait}."
 
 
@@ -98,27 +102,34 @@ class GroqLLM(BaseLLM):
         independent daily token limits on Groq's free tier.
         """
         fallback_note = ""
+        last_error = ""
         for model in FALLBACK_MODELS:
-            result = await self._run_agent_with_model(
+            result, rate_err = await self._run_agent_with_model(
                 model, user_message, user_id,
             )
             if result is not None:
                 return fallback_note + result
+            last_error = rate_err
             next_model = _next_model(model)
             if next_model:
+                wait = _parse_retry_time(rate_err)
                 fallback_note = (
-                    f"_{model} rate-limited, falling back to {next_model}_\n\n"
+                    f"_{model} rate-limited ({wait}),"
+                    f" falling back to {next_model}_\n\n"
                 )
                 logger.info(
                     "Rate limited on %s, falling back to %s", model, next_model,
                 )
 
-        return _rate_limit_message("")
+        return _rate_limit_message(last_error)
 
     async def _run_agent_with_model(
         self, model: str, user_message: str, user_id: int,
-    ) -> str | None:
-        """Run the agent loop with a specific model. Returns None if rate-limited."""
+    ) -> tuple[str | None, str]:
+        """Run the agent loop with a specific model.
+
+        Returns (response, error_text). response is None if rate-limited.
+        """
         messages: list[dict] = [
             {"role": "system", "content": get_system_prompt()},
             {"role": "user", "content": user_message},
@@ -139,7 +150,7 @@ class GroqLLM(BaseLLM):
                 logger.warning(
                     "Groq rate limit on %s (iter %d): %s", model, iteration, exc,
                 )
-                return None
+                return None, str(exc)
             except BadRequestError as exc:
                 err_str = str(exc)
                 if "tool_use_failed" in err_str and bad_tool_retries < MAX_RETRIES_ON_BAD_TOOL_CALL:
@@ -152,12 +163,12 @@ class GroqLLM(BaseLLM):
                 logger.error(
                     "Groq bad request on %s (iter %d): %s", model, iteration, exc,
                 )
-                return "Sorry, I'm having trouble processing that right now."
+                return "Sorry, I'm having trouble processing that right now.", ""
             except Exception as exc:
                 logger.error(
                     "Groq agent call failed on %s (iter %d): %s", model, iteration, exc,
                 )
-                return "Sorry, I'm having trouble processing that right now."
+                return "Sorry, I'm having trouble processing that right now.", ""
 
             choice = response.choices[0]
             assistant_msg = choice.message
@@ -165,7 +176,7 @@ class GroqLLM(BaseLLM):
             if not assistant_msg.tool_calls:
                 if model != FALLBACK_MODELS[0]:
                     logger.info("Response served by fallback model: %s", model)
-                return assistant_msg.content or "I'm not sure how to help with that."
+                return assistant_msg.content or "I'm not sure how to help with that.", ""
 
             messages.append({
                 "role": "assistant",
@@ -205,4 +216,4 @@ class GroqLLM(BaseLLM):
             "Agent hit max iterations (%d) on %s for user %d",
             MAX_AGENT_ITERATIONS, model, user_id,
         )
-        return "I took too many steps processing that. Could you simplify your request?"
+        return "I took too many steps processing that. Could you simplify your request?", ""
