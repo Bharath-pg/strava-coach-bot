@@ -5,7 +5,7 @@ import json
 import logging
 import re
 
-from groq import AsyncGroq, RateLimitError
+from groq import AsyncGroq, BadRequestError, RateLimitError
 
 from src.config import settings
 from src.llm.base import BaseLLM
@@ -15,6 +15,7 @@ from src.llm.tools import TOOL_SCHEMAS, execute_tool
 logger = logging.getLogger(__name__)
 
 MAX_AGENT_ITERATIONS = 8
+MAX_RETRIES_ON_BAD_TOOL_CALL = 2
 
 _RETRY_RE = re.compile(r"try again in (\d+m[\d.]+s|\d+[\d.]*s)")
 
@@ -87,6 +88,7 @@ class GroqLLM(BaseLLM):
             {"role": "user", "content": user_message},
         ]
 
+        bad_tool_retries = 0
         for iteration in range(MAX_AGENT_ITERATIONS):
             try:
                 response = await self.client.chat.completions.create(
@@ -100,6 +102,13 @@ class GroqLLM(BaseLLM):
             except RateLimitError as exc:
                 logger.warning("Groq rate limit hit (iter %d): %s", iteration, exc)
                 return _rate_limit_message(str(exc))
+            except BadRequestError as exc:
+                if "tool_use_failed" in str(exc) and bad_tool_retries < MAX_RETRIES_ON_BAD_TOOL_CALL:
+                    bad_tool_retries += 1
+                    logger.warning("Groq malformed tool call (retry %d): %s", bad_tool_retries, exc)
+                    continue
+                logger.error("Groq bad request (iter %d): %s", iteration, exc)
+                return "Sorry, I'm having trouble processing that right now."
             except Exception as exc:
                 logger.error("Groq agent call failed (iter %d): %s", iteration, exc)
                 return "Sorry, I'm having trouble processing that right now."
