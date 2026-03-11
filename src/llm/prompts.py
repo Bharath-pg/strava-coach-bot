@@ -31,6 +31,14 @@ When the user asks you to create a training plan:
 - Session types: easy, rest, tempo, intervals, strides, long, race.
 - Keep pace targets realistic for the user's goal.
 - The plan replaces any existing active plan.
+- For intervals, tempo, and strides sessions, write the description as a multi-line \
+breakdown with approximate distances for each segment. Example for an intervals session \
+with 6 km total:
+  Warm-up jog: ~1.5 km
+  4×800m repeats: 3.2 km
+  Recovery jogs: ~0.5 km
+  Cool-down jog: ~0.8 km
+- For easy and long runs, a single-line description is fine (e.g. "Easy run at conversational pace").
 
 ## Training Plan Editing
 - When the user wants to change a session, use get_training_plan to find the session ID first, then update_training_session.

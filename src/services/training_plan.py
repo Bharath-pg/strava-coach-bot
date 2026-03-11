@@ -147,12 +147,13 @@ async def format_daily_notification(user_id: int, target_date: date) -> str:
             "Rest day. Recover and hydrate!"
         )
 
-    pace_info = f" at {planned.pace_target}" if planned.pace_target else ""
-    return (
+    pace_info = f" | Pace: {planned.pace_target}" if planned.pace_target else ""
+    header = (
         f"\U0001f3c3 {day_label} (Week {week_num}) \u2014 "
-        f"{planned.description}\n"
-        f"   {planned.distance_km} km{pace_info} | {planned.session_type}"
+        f"{planned.session_type.capitalize()} "
+        f"({planned.distance_km} km{pace_info})"
     )
+    return f"{header}\n\n{planned.description}"
 
 
 # ---------------------------------------------------------------------------
