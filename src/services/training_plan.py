@@ -95,6 +95,67 @@ def get_planned_run_count(sessions: list[PlannedSession]) -> int:
 
 
 # ---------------------------------------------------------------------------
+# Daily notification
+# ---------------------------------------------------------------------------
+
+async def format_daily_notification(user_id: int, target_date: date) -> str:
+    """Build a Telegram message describing the session for *target_date*.
+
+    Returns a human-readable string for every case:
+    no plan, rest day, run day, or date outside the plan range.
+    """
+    from src.db.session import async_session_factory
+
+    async with async_session_factory() as session:
+        plan = await get_active_plan(session, user_id)
+
+    if not plan:
+        return (
+            "\U0001f4cb You don't have an active training plan yet. "
+            "Tell me your goal and I'll create one!"
+        )
+
+    day_label = target_date.strftime("%A, %b %d")
+    week_num = get_week_number(plan.start_date, target_date)
+
+    if target_date < plan.start_date:
+        days_until = (plan.start_date - target_date).days
+        suffix = "s" if days_until != 1 else ""
+        return (
+            f"\U0001f4c5 {day_label} \u2014 Your plan ({plan.name}) "
+            f"starts in {days_until} day{suffix}. Rest up until then!"
+        )
+
+    if target_date > plan.end_date:
+        return (
+            f"\U0001f3c1 {day_label} \u2014 Your plan ({plan.name}) "
+            f"ended on {plan.end_date:%b %d}. Time to set a new goal!"
+        )
+
+    async with async_session_factory() as session:
+        planned = await get_session(session, user_id, target_date)
+
+    if not planned:
+        return (
+            f"\U0001f6cc {day_label} (Week {week_num}) \u2014 "
+            "No session scheduled. Enjoy the rest!"
+        )
+
+    if planned.session_type == "rest":
+        return (
+            f"\U0001f6cc {day_label} (Week {week_num}) \u2014 "
+            "Rest day. Recover and hydrate!"
+        )
+
+    pace_info = f" at {planned.pace_target}" if planned.pace_target else ""
+    return (
+        f"\U0001f3c3 {day_label} (Week {week_num}) \u2014 "
+        f"{planned.description}\n"
+        f"   {planned.distance_km} km{pace_info} | {planned.session_type}"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Write operations
 # ---------------------------------------------------------------------------
 

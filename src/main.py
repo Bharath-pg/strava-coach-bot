@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import datetime
 import logging
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -16,6 +17,7 @@ from src.bot.handlers.start import help_handler, start_handler
 from src.config import settings
 from src.db.session import async_session_factory
 from src.services.reminder import advance_or_deactivate, get_due_reminders
+from src.services.training_plan import format_daily_notification
 from src.services.weekly_checkin import send_weekly_checkin
 
 logging.basicConfig(
@@ -52,10 +54,46 @@ async def weekly_checkin_job(app) -> None:  # type: ignore[no-untyped-def]
             logger.exception("Failed to send weekly check-in to %d", uid)
 
 
+async def daily_morning_plan(app) -> None:  # type: ignore[no-untyped-def]
+    """6:00 AM IST (00:30 UTC) -- send today's training plan."""
+    today = datetime.date.today()
+    for uid in settings.allowed_users:
+        try:
+            msg = await format_daily_notification(uid, today)
+            await app.bot.send_message(
+                chat_id=uid,
+                text=f"\u2600\ufe0f Good morning!\n\n{msg}",
+            )
+        except Exception:
+            logger.exception("Failed to send morning plan to %d", uid)
+
+
+async def daily_evening_plan(app) -> None:  # type: ignore[no-untyped-def]
+    """10:00 PM IST (16:30 UTC) -- send tomorrow's training plan."""
+    tomorrow = datetime.date.today() + datetime.timedelta(days=1)
+    for uid in settings.allowed_users:
+        try:
+            msg = await format_daily_notification(uid, tomorrow)
+            await app.bot.send_message(
+                chat_id=uid,
+                text=f"\U0001f319 Tomorrow's plan:\n\n{msg}",
+            )
+        except Exception:
+            logger.exception("Failed to send evening plan to %d", uid)
+
+
 async def post_init(app) -> None:  # type: ignore[no-untyped-def]
     """Called after the Application is initialized and the event loop is running."""
     scheduler = AsyncIOScheduler()
     scheduler.add_job(check_reminders, "interval", seconds=30, args=[app])
+
+    scheduler.add_job(
+        daily_morning_plan, "cron", hour=0, minute=30, args=[app],
+    )
+    scheduler.add_job(
+        daily_evening_plan, "cron", hour=16, minute=30, args=[app],
+    )
+    logger.info("Daily plan notifications scheduled (6:00 AM / 10:00 PM IST)")
 
     if settings.strava_client_id:
         scheduler.add_job(
