@@ -159,6 +159,15 @@ class GroqLLM(BaseLLM):
                         "Groq malformed tool call on %s (retry %d): %s",
                         model, bad_tool_retries, exc,
                     )
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            "Your previous tool call was malformed. "
+                            "Do NOT use <function=...> syntax. "
+                            "Use the standard tool_call mechanism "
+                            "provided by the API. Try again."
+                        ),
+                    })
                     continue
                 logger.error(
                     "Groq bad request on %s (iter %d): %s", model, iteration, exc,
