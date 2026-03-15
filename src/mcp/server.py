@@ -365,12 +365,17 @@ async def delete_training_session(user_id: int, session_id: int) -> str:
     return f"Session {session_id} not found in your active plan."
 
 
-class _APIKeyMiddleware:
-    """ASGI middleware: rejects requests without a valid Bearer token."""
+class _SecretPathMiddleware:
+    """ASGI middleware: requires a secret key in the URL path.
+
+    Rewrites /mcp/<key>/... to /mcp/... after validation,
+    so the upstream MCP app sees its standard /mcp route.
+    """
 
     def __init__(self, app, api_key: str):  # type: ignore[no-untyped-def]
         self.app = app
         self.api_key = api_key
+        self._prefix = f"/mcp/{api_key}"
 
     async def __call__(self, scope, receive, send):  # type: ignore[no-untyped-def]
         if scope["type"] == "http":
@@ -378,12 +383,14 @@ class _APIKeyMiddleware:
             if path == "/health":
                 await self.app(scope, receive, send)
                 return
-            headers = dict(scope.get("headers", []))
-            auth_header = headers.get(b"authorization", b"").decode()
-            if auth_header != f"Bearer {self.api_key}":
-                resp = JSONResponse({"error": "Unauthorized"}, status_code=401)
-                await resp(scope, receive, send)
+            if path.startswith(self._prefix):
+                scope = dict(scope)
+                scope["path"] = "/mcp" + path[len(self._prefix):]
+                await self.app(scope, receive, send)
                 return
+            resp = JSONResponse({"error": "Unauthorized"}, status_code=401)
+            await resp(scope, receive, send)
+            return
         await self.app(scope, receive, send)
 
 
@@ -409,12 +416,12 @@ def main() -> None:
         app.routes.append(Route("/health", _health))
 
         if api_key:
-            app = _APIKeyMiddleware(app, api_key)  # type: ignore[assignment]
-            logger.info("API key authentication enabled")
+            app = _SecretPathMiddleware(app, api_key)  # type: ignore[assignment]
+            logger.info("API key path authentication enabled (use /mcp/<key>)")
         else:
             logger.warning("No MCP_API_KEY set — server is unauthenticated!")
 
-        logger.info("Starting MCP server (streamable-http) on %s:%d/mcp", host, port)
+        logger.info("Starting MCP server (streamable-http) on %s:%d", host, port)
         config = uvicorn.Config(app, host=host, port=port, log_level="info")
         server = uvicorn.Server(config)
         asyncio.run(server.serve())
