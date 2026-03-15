@@ -4,7 +4,7 @@ An agentic Telegram running coach powered by Strava, LLM tool-calling, and MCP.
 
 The bot uses Groq's `llama-3.3-70b` with native function calling to autonomously decide which tools to invoke, chain multiple calls, and compose natural responses -- no hardcoded intent routing or if/else trees.
 
-**Built with**: Python 3.12 | Groq | Strava API | PostgreSQL | Docker | MCP | Railway
+**Built with**: Python 3.12 | Groq | Strava API | PostgreSQL | Docker | MCP (stdio + HTTP) | Railway
 
 ---
 
@@ -36,37 +36,38 @@ The LLM receives a set of tool schemas and decides on its own what to call. It c
 - **Strava Integration** -- live activity data via OAuth2. Fetches runs, compares pace/distance against plan, generates weekly reports.
 - **DB-Backed Training Plans** -- create full training plans via natural language ("Create a 10K plan for sub-60 by April 27"). Plans are stored in PostgreSQL with full CRUD: add, edit, and delete individual sessions.
 - **Reminders** -- set one-time or recurring reminders (daily/weekly/monthly) delivered on schedule.
-- **MCP Server** -- all 11 tools exposed via Model Context Protocol for external LLM clients (Cursor, Claude Desktop).
-- **Deployed on Railway** -- auto-deploys on push to `main`, runs 24/7.
+- **MCP Server (stdio + HTTP)** -- all 12 tools exposed via Model Context Protocol. Supports **stdio** for local clients (Cursor, Claude Desktop) and **Streamable HTTP** for remote clients (ChatGPT). Same codebase, switchable via `MCP_TRANSPORT` env var.
+- **Multi-Client Architecture** -- the same training data is accessible from **Telegram** (Groq), **Cursor** (Claude), and **ChatGPT** (GPT) simultaneously, all hitting the same MCP server and PostgreSQL database.
+- **Deployed on Railway** -- auto-deploys on push to `main`, runs 24/7. Bot and MCP HTTP server run as separate Railway services sharing one Postgres instance.
 
 ---
 
 ## Architecture
 
 ```
-User Message
-     │
-     ▼
-┌─────────────────────────────────────────┐
-│          Agent Loop (max 8 iters)       │
-│  Groq llama-3.3-70b + tool_choice=auto │
-│                                         │
-│  1. Send message + 11 tool schemas      │
-│  2. LLM returns tool_calls[]            │
-│  3. Execute tools, feed results back    │
-│  4. Repeat until final text response    │
-└──────────────┬──────────────────────────┘
-               │ tool calls
-    ┌──────────┼──────────┐
-    ▼          ▼          ▼
- Strava    Reminders   Training
- Service   Service     Plan Service
-    │          │          │
-    ▼          ▼          ▼
- Strava      PostgreSQL
-  API       (reminders +
-           training plans)
+┌─────────────┐     ┌─────────────┐     ┌─────────────┐
+│  Telegram   │     │   Cursor    │     │   ChatGPT   │
+│  (Groq LLM) │     │(Claude 4.6) │     │  (GPT Pro)  │
+└──────┬──────┘     └──────┬──────┘     └──────┬──────┘
+       │                   │                   │
+       │ stdio             │ stdio             │ HTTPS
+       │                   │                   │
+       └───────────┬───────┘                   │
+                   │                           │
+            ┌──────┴──────┐          ┌─────────┴────────┐
+            │  MCP Server │          │  MCP HTTP Server  │
+            │   (local)   │          │    (Railway)      │
+            └──────┬──────┘          └─────────┬────────┘
+                   │                           │
+                   └───────────┬───────────────┘
+                               │
+                    ┌──────────┴──────────┐
+                    │  PostgreSQL (Railway)│
+                    │  Strava API          │
+                    └─────────────────────┘
 ```
+
+**Agent loop** (Telegram bot): Groq `llama-3.3-70b` with `tool_choice=auto`, max 8 iterations. The LLM decides which tools to call, chains multiple calls per message, and composes natural responses.
 
 Key design decisions:
 - **`user_id` injected server-side** -- not in tool schemas, so the LLM can't fabricate user IDs
@@ -130,12 +131,21 @@ python -m src.main
 
 ### Deploy to Railway
 
-The repo includes a `railway.toml` ready to go:
+The repo includes two Railway configs:
 
+**Telegram Bot** (`railway.toml`):
 1. Connect your GitHub repo on [railway.app](https://railway.app)
 2. Add a Postgres plugin
 3. Set environment variables (see below)
-4. Deploy -- that's it
+4. Deploy
+
+**MCP HTTP Server** (`railway-mcp.toml`):
+1. Add a new service in the same Railway project, pointing to the same repo
+2. Set config file to `railway-mcp.toml` (Settings > Config-as-code)
+3. Add `MCP_TRANSPORT=http` and `MCP_API_KEY=<your-key>` to variables
+4. Link the existing Postgres service
+5. Generate a public domain (Settings > Networking)
+6. In ChatGPT: create an MCP app with URL `https://<domain>/mcp/<api-key>` and No Auth
 
 ---
 
@@ -152,6 +162,8 @@ The repo includes a `railway.toml` ready to go:
 | `LLM_PROVIDER` | No | `groq` (default) or `gemini` |
 | `ALLOWED_USER_IDS` | No | Comma-separated Telegram user IDs to restrict access |
 | `LOG_LEVEL` | No | Logging level (default: INFO) |
+| `MCP_TRANSPORT` | No | `stdio` (default) or `http` for Streamable HTTP |
+| `MCP_API_KEY` | No | API key for HTTP transport (embedded in URL path) |
 
 ---
 
@@ -179,11 +191,23 @@ To get your `STRAVA_REFRESH_TOKEN`:
 
 ## MCP Server
 
-Exposes 11 tools via stdio transport for external LLM clients:
+Exposes 12 tools via MCP. Supports two transports from the same codebase:
+
+### stdio (local clients: Cursor, Claude Desktop)
 
 ```bash
 python -m src.mcp.server
 ```
+
+### Streamable HTTP (remote clients: ChatGPT)
+
+```bash
+MCP_TRANSPORT=http MCP_API_KEY=your-secret-key python -m src.mcp.server
+```
+
+The HTTP server runs on `PORT` (default 8000), serves MCP at `/mcp/<api-key>`, and exposes `/health` for load balancer checks. Auth is embedded in the URL path since ChatGPT's MCP integration doesn't support Bearer tokens.
+
+### Available Tools
 
 | Tool | Description |
 |------|-------------|
@@ -225,7 +249,7 @@ src/
 ├── bot/
 │   ├── conversation.py        # NL catch-all → agent loop
 │   └── handlers/              # /start, /help, /remind, etc.
-└── mcp/server.py              # MCP server (stdio transport)
+└── mcp/server.py              # MCP server (stdio + HTTP transport)
 ```
 
 ---
