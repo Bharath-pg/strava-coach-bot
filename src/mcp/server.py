@@ -1,10 +1,19 @@
-"""MCP server exposing reminder, Strava, and training plan tools via stdio transport."""
+"""MCP server exposing reminder, Strava, and training plan tools via stdio and HTTP transports.
+
+Set MCP_TRANSPORT=http to run as a Streamable HTTP server (for ChatGPT, remote clients).
+Set MCP_API_KEY to require Bearer-token auth on the HTTP endpoint.
+"""
 from __future__ import annotations
 
+import asyncio
 import datetime
 import logging
+import os
 
 from mcp.server.fastmcp import FastMCP
+from starlette.requests import Request
+from starlette.responses import JSONResponse, PlainTextResponse
+from starlette.routing import Route
 
 from src.db.session import async_session_factory
 from src.services.reminder import (
@@ -356,9 +365,62 @@ async def delete_training_session(user_id: int, session_id: int) -> str:
     return f"Session {session_id} not found in your active plan."
 
 
+class _APIKeyMiddleware:
+    """ASGI middleware: rejects requests without a valid Bearer token."""
+
+    def __init__(self, app, api_key: str):  # type: ignore[no-untyped-def]
+        self.app = app
+        self.api_key = api_key
+
+    async def __call__(self, scope, receive, send):  # type: ignore[no-untyped-def]
+        if scope["type"] == "http":
+            path = scope.get("path", "")
+            if path == "/health":
+                await self.app(scope, receive, send)
+                return
+            headers = dict(scope.get("headers", []))
+            auth_header = headers.get(b"authorization", b"").decode()
+            if auth_header != f"Bearer {self.api_key}":
+                resp = JSONResponse({"error": "Unauthorized"}, status_code=401)
+                await resp(scope, receive, send)
+                return
+        await self.app(scope, receive, send)
+
+
+def _health(_request: Request) -> PlainTextResponse:
+    return PlainTextResponse("ok")
+
+
 def main() -> None:
-    logger.info("Starting MCP server (stdio)...")
-    mcp.run(transport="stdio")
+    transport = os.getenv("MCP_TRANSPORT", "stdio")
+
+    if transport == "http":
+        import uvicorn
+
+        host = os.getenv("MCP_HOST", "0.0.0.0")
+        port = int(os.getenv("PORT", "8000"))
+        api_key = os.getenv("MCP_API_KEY", "")
+
+        mcp.settings.host = host
+        mcp.settings.port = port
+        mcp.settings.stateless_http = True
+
+        app = mcp.streamable_http_app()
+        app.routes.append(Route("/health", _health))
+
+        if api_key:
+            app = _APIKeyMiddleware(app, api_key)  # type: ignore[assignment]
+            logger.info("API key authentication enabled")
+        else:
+            logger.warning("No MCP_API_KEY set — server is unauthenticated!")
+
+        logger.info("Starting MCP server (streamable-http) on %s:%d/mcp", host, port)
+        config = uvicorn.Config(app, host=host, port=port, log_level="info")
+        server = uvicorn.Server(config)
+        asyncio.run(server.serve())
+    else:
+        logger.info("Starting MCP server (stdio)...")
+        mcp.run(transport="stdio")
 
 
 if __name__ == "__main__":

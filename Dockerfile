@@ -16,3 +16,7 @@ CMD ["python", "-m", "src.main"]
 
 FROM base AS mcp-server
 CMD ["python", "-m", "src.mcp.server"]
+
+FROM base AS mcp-http
+ENV MCP_TRANSPORT=http
+CMD ["python", "-m", "src.mcp.server"]
