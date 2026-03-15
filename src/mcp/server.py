@@ -11,6 +11,7 @@ import logging
 import os
 
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 from starlette.requests import Request
 from starlette.responses import JSONResponse, PlainTextResponse
 from starlette.routing import Route
@@ -411,6 +412,9 @@ def main() -> None:
         mcp.settings.host = host
         mcp.settings.port = port
         mcp.settings.stateless_http = True
+        mcp.settings.transport_security = TransportSecuritySettings(
+            enable_dns_rebinding_protection=False,
+        )
 
         app = mcp.streamable_http_app()
         app.routes.append(Route("/health", _health))
